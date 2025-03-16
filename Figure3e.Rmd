@@ -1,0 +1,103 @@
+---
+title: "Figure 3E - LibA HSC Monotonicity"
+author: "Robert Froemel & Lars Velten"
+date: "2025-02-27"
+output: html_document
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  require(ggplot2)
+  require(scam)
+  require(splines)
+  require(plyr)
+  require(dplyr)
+  require(tibble)
+  require(tidyr)
+  require(ggh4x)
+  require(viridis)
+  require(parallel)
+  require(mgcv)
+  require(R.utils)
+  library(tidyverse)
+})
+
+
+#Needed functions
+'%nin%' = Negate('%in%')
+scale_values <- function(x){(x-min(x))/(max(x)-min(x))}
+
+load(url("https://figshare.com/ndownloader/files/53009321"))
+
+# Figure 2B 
+# Use class of this data frame for annotating TFs
+#TF_status <- readRDS("~/cluster/project/SCG4SYN/Manuscript/1_libA_levels_HSC/003_activem_libA.rds")
+TF_status <- subset(readRDS("Figure2_TF_classification.rds"), !grepl("-",tfcombo))
+colnames(TF_status)[1] <- "TF"
+TF_status$TF <- as.character(TF_status$TF)
+TF_class <- read.csv("additional_data/Figure3_TFclasses.csv")
+
+```
+
+```{r, warning=FALSE}
+TF_Full_model <-  lapply(unique(mpra.data$HSPC.libA$DATA$TF), function(x) {
+  temp_df <- mpra.data$HSPC.libA$DATA %>% filter(TF %in% x);
+  mpi <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "mpi" ), data = temp_df);
+  mpd <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "mpd" ), data = temp_df);
+  cv <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "cv" ), data = temp_df);
+  cx <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "cx" ), data = temp_df);
+  micv <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "micv" ), data = temp_df);
+  micx <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "micx" ), data = temp_df);
+  mdcv <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "mdcv" ), data = temp_df);
+  mdcx <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "mdcx" ), data = temp_df);
+  ps <- scam(mean.scaled.final ~ s(sum.biophys.affinity, bs = "ps" ), data = temp_df);
+  baseline <- lm(mean.scaled.final ~ 1, data = temp_df); #was scam
+  out <- list(mpi = mpi, mpd = mpd, cv = cv, cx = cx, micv = micv, micx= micx, mdcv = mdcv, mdcx = mdcx, ps = ps, baseline = baseline);
+  return(out)
+})
+
+names(TF_Full_model) <- unique(mpra.data$HSPC.libA$DATA$TF)
+
+TF_Ful_model_aic <- as.data.frame(sapply(TF_Full_model, function(x) {sapply(x, function(y) {AIC(y)}, USE.NAMES = F)})) %>% 
+  rownames_to_column("spline") %>% 
+  pivot_longer(!spline, names_to = "TF", values_to = "Value")
+
+TF_Ful_model_aic <- inner_join(TF_Ful_model_aic, TF_status %>% select(TF,class ), by = "TF")
+TF_Ful_model_aic <- inner_join(TF_Ful_model_aic, TF_class, by = "TF")
+```
+
+```{r}
+# Make data frame with baseline
+TF_Ful_model_aic_delta <- TF_Ful_model_aic %>% 
+  dplyr::filter(spline %in% c("mpd", "mpi", "cv", "baseline")) %>% 
+  dplyr::group_by(TF) %>% 
+  dplyr::mutate(selected_model = spline[which.min(Value)]) %>% 
+  ungroup() %>%
+  pivot_wider(id_cols = c(TF, selected_model, class, Category), names_from =spline, values_from = Value ) %>% 
+  mutate(Inc_Base = mpi - baseline, Dec_Base = mpd - baseline, CV_Inc = cv - mpi, CV_Dec = cv - mpd, CV_Base = cv - baseline, Base_Base = baseline - baseline , Base_Inc = baseline - mpi , Base_Dec = baseline - mpd  ) %>%  
+  mutate(CV_selected = pmax(CV_Inc, CV_Dec)) %>%  
+  mutate(selected_model = ifelse(selected_model %in% "cv" & CV_selected > -2, ifelse(mpi < mpd & Inc_Base <= -2, "mpi", ifelse(Dec_Base > -2, "baseline", "mpd")), selected_model)) %>%
+    mutate(selected_model = ifelse(selected_model %in% "mpi" & Inc_Base > -2  | selected_model %in% "mpd" & Dec_Base > -2 , "baseline", selected_model)) %>%
+  mutate(Selected = ifelse(selected_model %in% "cv", CV_selected, ifelse(selected_model %in% "mpi", Inc_Base, ifelse(selected_model %in% "mpd", Dec_Base, pmin(Inc_Base,  Dec_Base, Base_Base))) )) %>%
+  mutate(selected_model = factor(selected_model, levels = c("cv","mpi","mpd","baseline")))
+
+selected_model.labs <- c("Base-\nline","Concave", "Monotonous\nDecreasing", "Monotonous\nIncreasing")
+names(selected_model.labs) <- c("baseline","cv", "mpd", "mpi")
+levels(selected_model.labs) <- c("baseline","mpi", "mpd","cv" )
+```
+
+```{r, fig.width=10.5,fig.height=5}
+p2 <- ggplot(data = TF_Ful_model_aic_delta %>% mutate(Category = ifelse(.$Category %in% "Signaling", "signaling relay", "other")),  aes(x=reorder(TF,-Selected), y= log10(Selected *-1), color = class, shape = Category)) +
+# facet_grid(~next_model, scales = "free_x", space='free' ) + 
+  facet_grid(~selected_model, scales = "free_x", space='free', labeller = labeller(selected_model = selected_model.labs) ) + 
+  geom_point(size = 6, stroke = 2) + 
+  scale_shape_manual(name = "TF type", values=c(19,21)) +
+  labs(x = "Transcription factor", y = "Log10(Delta AIC)") + 
+  scale_color_manual(name = "Class (HSPC)", values = c("#68C3A6", "#F78C63", "#E58BBA", "#8CA0CC")) +
+  geom_hline(aes(yintercept = log10(2)), linetype = "dashed") +
+  theme_bw() + 
+  theme(panel.grid = element_blank(),axis.text = element_text(hjust = 1, size = 20), axis.text.x = element_text(angle= 90, vjust = 0.5), axis.title = element_text(size = 20), strip.text = element_text(size = 20), legend.text = element_text(size = 16), legend.title = element_text(size = 18), legend.position = "bottom"  ) + guides(color=guide_legend(nrow=1,byrow=TRUE), shape = guide_legend(nrow=1,byrow=TRUE))
+
+p2
+```

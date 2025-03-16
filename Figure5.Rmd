@@ -1,0 +1,256 @@
+---
+title: "Figure 5"
+author: "Robert Froemel & Lars Velten"
+date: "2025-03-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data from figshare
+
+```{r load_data}
+load(url("https://figshare.com/ndownloader/files/53009321"))
+load("additional_data/Figure5_LibHAnnotation.rda") #also load additional annotation / design info for Lib H
+combined <- readRDS("Figure2_TF_data.rds") #and the summaries generated in figure 2
+
+```
+
+```{r load_packages, warning=F, message=F}
+require(ggplot2)
+require(ggrepel)
+require(plyr)
+require(reshape2)
+require(gridExtra)
+require(stringr)
+require(motifmatchr)
+require(TFBSTools)
+require(SummarizedExperiment)
+```
+
+## Figure 5B
+
+Simply determine % of sequences active above background for each factor combination and cell state, for LibB and LibH.
+
+```{r fig5b, fig.width=2.2,fig.height=2.35}
+
+heptad <- unique(c(mpra.data$HSPC.libB$DATA$TF1.name,unique(mpra.data$HSPC.libB$DATA$TF2.name)))
+
+MULTI <- merge(mpra.data$HSPC.libH$DATA, libH.meta[, c("CRS", "Design")])
+
+all_bad_sites <- subset(mpra.data$HSPC.libH$CONTROLS.GENERAL,ControlType == "ScrambleTFBS")
+bad_range <- ddply(as.data.frame(all_bad_sites), "clusterID",summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+rownames(bad_range) <- bad_range$clusterID
+
+MULTI <- merge(MULTI, bad_range)
+MULTI$active <- with(MULTI, mean.norm.adj > q95.background)
+MULTI$repressed <- with(MULTI, mean.norm.adj < q05.background)
+
+TF.count <- sapply(pwm.names, function(x) str_count(MULTI$Design, sprintf("%s_",x)))
+
+MULTI <- cbind(MULTI, TF.count)
+
+
+MULTI$Fli1Spi1 <- with(MULTI, paste(Fli1 > 0, Spi1 > 0))
+perc.active <- ddply(MULTI, c("Fli1Spi1","clusterID"), summarise, perc.act = mean(active), perc.repr = mean(repressed), N = length(active))
+
+
+pairs <- do.call(rbind, lapply(names(cellstate.map), function(ct) {
+  ct.m <- MULTI$clusterID == ct
+  do.call(rbind, lapply(heptad, function(tf1) {
+    tf1.m <- MULTI[, tf1] > 0
+    do.call(rbind, lapply(heptad, function(tf2) {
+      tf2.m <- MULTI[, tf2] > 0
+      relevant <- MULTI[ct.m & tf1.m & tf2.m,  ]
+      data.frame(clusterID = ct, TF1 = tf1, TF2 = tf2, perc.active = mean(relevant$active), perc.repr = mean(relevant$repressed), N = nrow(relevant))
+    }))
+  }))
+}))
+pairs$tfcombo <- with(pairs, sprintf("%s-%s", TF1, TF2))
+
+multi.vs.libH <- merge(pairs, combined)
+cellstate.colors["State_7M"] <- "#AF7520"
+
+ggplot(aes(x = 100*n_active, y = 100*perc.active), data = subset(multi.vs.libH,N>10 )) + 
+  geom_point( color = "grey60", size=0.75) + 
+  geom_point(aes(color = clusterID), data = subset(multi.vs.libH, TF2 == "Fli1" & TF1 == "Spi1")) + 
+  ylab("% active, Pair (Lib B)") +
+  scale_x_log10()+ scale_y_log10()+
+  scale_color_manual(values = cellstate.colors, labels = cellstate.map, name = "Example:\nFli1-Spi1 in...") + 
+  scale_shape_discrete(labels = cellstate.map) + 
+  xlab("% active\nComplex Synthetic (Lib H)")  + theme_bw() + theme(panel.grid = element_blank(), legend.position = "none") + 
+  scale_size_continuous(range= c(0.5,1.5), breaks = round(seq(min(multi.vs.libH$N), max(multi.vs.libH$N), length.out = 4  )))
+```
+
+## Figure 5C
+
+Simply determine % of sequences active above background for each factor combination and cell state, for LibB and LibG. In LibG, factor combinations are identified by motifmatchr.
+
+```{r fig5c, fig.width=3,fig.height=2.35}
+N <- mpra.data$HSPC.libG$DATA
+
+motif_scores <- matchMotifs(motifs, N$Seq,  genome = BSgenome.Hsapiens.UCSC.hg38,out = "scores")
+N  <- cbind(N, as.matrix(assay(motif_scores)))
+N$Fli1Spi1 <- with(N, paste(Fli1 > 0, Spi1 > 0))
+
+
+all_bad_sites <- subset(mpra.data$HSPC.libG$CONTROLS.GENERAL,ControlType == "ScrambleTFBS")
+bad_range <- ddply(as.data.frame(all_bad_sites), "clusterID",summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+rownames(bad_range) <- bad_range$clusterID
+
+N <- merge(N, bad_range)
+N$active <- with(N, mean.norm.adj > q95.background)
+N$repressed <- with(N, mean.norm.adj < q05.background)
+
+perc.active <- ddply(N, c("Fli1Spi1","clusterID"), summarise, perc.act = mean(active), perc.repr = mean(repressed), N = length(active))
+
+
+#do this systematically for all pairs to gain correlations with libH
+pairs <- do.call(rbind, lapply(names(cellstate.map), function(ct) {
+  ct.m <- N$clusterID == ct
+  do.call(rbind, lapply(heptad, function(tf1) {
+    tf1.m <- N[, tf1] > 0
+    do.call(rbind, lapply(heptad, function(tf2) {
+      tf2.m <- N[, tf2] > 0
+      relevant <- N[ct.m & tf1.m & tf2.m,  ]
+    data.frame(clusterID = ct, TF1 = tf1, TF2 = tf2, perc.active = mean(relevant$active), perc.repr = mean(relevant$repressed), N = nrow(relevant))
+  }))
+}))
+}))
+pairs$tfcombo <- with(pairs, sprintf("%s-%s", TF1, TF2))
+
+nat.vs.libH <- merge(pairs, combined)
+
+
+ggplot(aes(x = 100*n_active, y = 100*perc.active), data = subset(nat.vs.libH,N>10 )) + 
+  geom_point( aes( size = N), color = "grey60") + 
+  geom_point(aes(size = N, color = clusterID), data = subset(nat.vs.libH, TF2 == "Fli1" & TF1 == "Spi1")) + 
+  ylab("% active, Pair (Lib B)") +
+  scale_x_log10()+ scale_y_log10()+
+  scale_color_manual(values = cellstate.colors, labels = cellstate.map, name = "Example:\nFli1-Spi1 in...") + 
+  scale_shape_discrete(labels = cellstate.map) + 
+  xlab("% active\nGenome (Lib G)")  + theme_bw() + theme(panel.grid = element_blank()) + 
+  scale_size_continuous(name = "N obs.\n(Lib G)",range= c(0.2,3.5), breaks = round(seq(10, max(nat.vs.libH$N), length.out = 4  )))
+
+```
+
+## Figure 5D
+
+```{r fig5d, fig.width = 2.2,fig.width=4}
+    active_by_celltype <- ddply(as.data.frame(N), c("Fli1Spi1","clusterID"), summarise,
+                                n_active = mean(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                n_repressed = mean(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+
+qplot(x = Fli1Spi1, y = clusterID, fill = 100*n_repressed, data = active_by_celltype, geom="tile") + 
+  scale_x_discrete(labels = c("FALSE FALSE" = "Neither motif", "FALSE TRUE" = "Fli1, no Spi1", "TRUE FALSE" = "Spi1, no Fli1", "TRUE TRUE" = "Both motifs")) +
+  scale_y_discrete(labels = cellstate.map) + 
+  theme_bw() + scale_fill_gradientn(name = "% sequences\nrepressed", colours = c("black","blue", "green")) +
+  theme(axis.text.x = element_text(angle=45, hjust=1), axis.title =  element_blank())  
+
+```
+
+## Figure 5F
+
+Code for training the deep learning model is on https://github.com/veltenlab/MPRA_prediction . During training, the predictions on the held out testsets are written to a csv file, which we here just read in, and merge with the measured values to compute the test set R2.
+
+```{r fig5f,fig.width=2,fig.height=2}
+
+rbind_overlaps <- function(...) {
+  entries <- list(...)
+  rbind_o_internal <- function(a,b){
+    usecols <- intersect(colnames(a),colnames(b))
+    rbind(a[,usecols],b[,usecols])
+  }
+  out <- rbind_o_internal(entries[[1]],entries[[2]])
+  if (length(entries) > 2) {
+    for (i in 3:length(entries)) {
+      out <-rbind_o_internal(out,entries[[i]])
+    }
+  }
+  return(out)
+}
+
+predictions <- readRDS("additional_data/testset_predictions.rds")
+all_data <- rbind_overlaps(
+  mpra.data$HSPC.libA$DATA,
+  mpra.data$HSPC.libB$DATA,
+  mpra.data$HSPC.libC$DATA
+)
+
+all_data$Seq <- toupper(all_data$Seq)
+
+all_data <-  merge(all_data, predictions, all.x = T)
+
+R2 <- ddply(all_data, c("Library"), summarise, 
+            R2_batch = cor(deep.batch, mean.norm.adj, use = "pairwise.complete.obs")^2, 
+            R2_tech = cor(norm.1.adj, norm.2.adj, use = "pairwise.complete.obs")^2)
+liblabel <- c("LibA"="Lib A", "LibB" = "Lib C", "LibH" ="Lib B")  #the labels used internally are different from the ones in the paper
+R2$label = liblabel[as.character(R2$Library)]
+
+ a <- ggplot(aes(x= label, y = R2_batch),data=R2 ) + 
+  geom_col() + ylab("R2 (10-fold CV)") + xlab("Library") + theme_bw() + theme(panel.grid = element_blank()) + 
+  geom_point(aes(y = R2_tech), shape =4)
+ print(a)
+```
+
+```{r fig5fpdf}
+pdf("panels/figure5f.pdf",width=2, height=2)
+print(a)
+dev.off()
+```
+
+## Figure 5G
+
+After the model is trained, we can use the functions from https://github.com/veltenlab/MPRA_prediction/blob/master/query_model_client.R to get predictions on Lib G and Lib H.
+
+```{r fig5g, fig.width=3.6, fig.height=2.4}
+
+#The code for queryign the model would be
+# libG <- predict_deep_model_batch(unique(mpra.data$HSPC.libG$DATA$Seq), "LibG", server = "127.0.0.1"))
+
+#here we just load the predictions
+libG.prediction <-as.data.frame(readRDS("additional_data/libG_predictions.rds"))
+libG.prediction$Seq <- toupper(rownames(libG.prediction))
+mpra.data$HSPC.libG$DATA$Seq <- toupper(mpra.data$HSPC.libG$DATA$Seq)
+libG.prediction <- melt(libG.prediction, id.vars = c( "Seq"), value.name = "deep.batch", variable.name = "clusterID")
+
+holdout <- merge(mpra.data$HSPC.libG$DATA, libG.prediction)
+
+#add info on motifs
+motif_scores <- matchMotifs(motifs, holdout$Seq,  genome = BSgenome.Hsapiens.UCSC.hg38,out = "scores")
+holdout  <- cbind(holdout, as.matrix(assay(motif_scores)))
+
+holdout$nmotif <- apply(assay(motif_scores) > 0, 1,sum)
+
+#same thing for LibH
+libH.prediction <- readRDS("additional_data/libH_predictions.rds")
+mpra.data$HSPC.libH$DATA$Seq <- substr(toupper(mpra.data$HSPC.libH$DATA$Seq),5,250)
+
+holdoutH <- merge(mpra.data$HSPC.libH$DATA, libH.prediction)
+holdout.complete <- rbind_overlaps(holdout, holdoutH)
+holdout.complete$Library <- ifelse(holdout.complete$Library == "LibB", "LibH", "LibG") #internally we used different codes for the libraries
+
+R2_holdout <- ddply(holdout.complete, c( "Library"), summarise, 
+                    R2_batch = cor(deep.batch, mean.norm.adj, use = "pairwise.complete.obs")^2, 
+                    R2_tech = cor(norm.1.adj, norm.2.adj, use = "pairwise.complete.obs")^2, 
+                    nobs = length(Seq))
+R2_holdout_nmotif <- ddply(holdout.complete, c( "Library", "nmotif"), summarise, 
+                    R2_batch = cor(deep.batch, mean.norm.adj, use = "pairwise.complete.obs")^2, 
+                    R2_tech = cor(norm.1.adj, norm.2.adj, use = "pairwise.complete.obs")^2,
+                    nobs = length(Seq))
+
+
+ggplot(aes(x = as.factor(nmotif), y = R2_batch), data = R2_holdout_nmotif) + 
+  coord_cartesian() + geom_point(aes(size=nobs)) +
+  scale_y_sqrt(limits = c(0, max(R2_holdout_nmotif$R2_batch)), breaks = c(0,0.1,0.3,0.5))+
+  scale_size_continuous(range =c(0.5,2.5), name = "N observations", breaks = round(seq(min(R2_holdout_nmotif$nobs), max(R2_holdout_nmotif$nobs), length.out=4))) +
+  xlab("N motifs (42 TFs)") + ylab("R2") +
+  theme_bw() + theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(), legend.position = "bottom") + 
+  geom_hline(aes(yintercept = R2_tech),data= R2_holdout, linetype = 2) + facet_wrap(~Library, scales= "free_x") 
+```
+
+```{r sinfo}
+print(sessionInfo())
+```

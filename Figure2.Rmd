@@ -1,0 +1,346 @@
+---
+title: "Figure 2"
+author: "Robert Froemel & Lars Velten"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data from figshare
+
+```{r load_data}
+load(url("https://figshare.com/ndownloader/files/53009321"))
+```
+
+```{r load_packages, warning=F, message=F}
+set.seed(1234)
+require(ggplot2)
+require(ggrepel)
+require(plyr)
+require(reshape2)
+require(pheatmap)
+```
+
+
+## Activity vs. random DNA (Figure 2A)
+
+```{r helper_function, echo=F}
+rbind_overlaps <- function(...) {
+  entries <- list(...)
+  rbind_o_internal <- function(a,b){
+    usecols <- intersect(colnames(a),colnames(b))
+    rbind(a[,usecols],b[,usecols])
+  }
+  out <- rbind_o_internal(entries[[1]],entries[[2]])
+  if (length(entries) > 2) {
+    for (i in 3:length(entries)) {
+      out <-rbind_o_internal(out,entries[[i]])
+    }
+  }
+  return(out)
+}
+```
+
+```{r figure2a_left, fig.width=4,fig.height=2}
+forrect <- data.frame(xmax= quantile(mpra.data$HSPC.libA$CONTROLS.GENERAL$mean.norm.adj, c(0.05,0.95,1)),
+                      xmin = quantile(mpra.data$HSPC.libA$CONTROLS.GENERAL$mean.norm.adj, c(0,0.05,0.95)),
+                      ymin=c(-1,-1,-1), ymax = c(1,1,1),
+                      class = c("repressor","other","activator"))
+
+forplot <- rbind_overlaps(mpra.data$HSPC.libA$CONTROLS.GENERAL, mpra.data$HSPC.libA$DATA)
+forplot$isInert <- ifelse(forplot$CRS %in% mpra.data$HSPC.libA$CONTROLS.GENERAL$CRS, "Random DNA", "Placed TFBS")
+ggplot(aes(x = isInert , y = mean.scaled.final),data =forplot) + 
+  geom_violin(aes(fill=isInert)) + geom_boxplot(width=0.2, outlier.size = 0)+
+  theme_bw(base_size=14) + theme(panel.grid = element_blank(), legend.position = "none")  + xlab("Design") + scale_fill_manual(values= c("Random DNA"= "#DDDDDD", "Placed TFBS" = "#777777"))+
+  ylab("Activity") +coord_flip() + geom_hline(yintercept = quantile(mpra.data$HSPC.libA$CONTROLS.GENERAL$mean.scaled.final, c(0.05,0.95)),linetype=3)
+
+```
+
+For the bar chart on the right, there are two ways of doing this. In the manuscript, we show the % of sequences that are more active than random DNA in *any* cell state:
+
+```{r figure2a_right, fig.width=2.5,fig.height=2}
+
+mpra.data$HSPC.libB$DATA$Library <- "LibB"
+mpra.data$HSPC.libC$DATA$Library <- "LibC"
+all_data <- rbind_overlaps(
+  mpra.data$HSPC.libA$DATA,
+  mpra.data$HSPC.libB$DATA,
+  mpra.data$HSPC.libC$DATA
+)
+all_data$ControlType <- "Library"
+mpra.data$HSPC.libA$CONTROLS.GENERAL$Library <- "LibA"
+mpra.data$HSPC.libB$CONTROLS.GENERAL$Library <- "LibB"
+mpra.data$HSPC.libC$CONTROLS.GENERAL$Library <- "LibC"
+all_data <- rbind_overlaps(
+  all_data,
+  mpra.data$HSPC.libA$CONTROLS.GENERAL,
+  subset(  mpra.data$HSPC.libB$CONTROLS.GENERAL, ControlType == "ScrambleTFBS"),
+  subset( mpra.data$HSPC.libC$CONTROLS.GENERAL, ControlType == "ScrambleTFBS")
+)
+
+#summarise per sequence
+all_data_summary <- ddply(all_data, c("CRS", "Library","ControlType"), summarise, 
+                          max = max(mean.norm.adj), min = min(mean.norm.adj))
+
+
+all_bad_sites <- subset(all_data_summary,ControlType != "Library")
+bad_range <- ddply(as.data.frame(all_bad_sites), c( "Library"),summarise, 
+                   q05.background = quantile(max, 0.05), q95.background = quantile(max,0.95),
+                   q05.background.min = quantile(min, 0.05), q95.backgroundmin = quantile(min,0.95))
+
+
+all_data_summary <- merge(all_data_summary, bad_range)
+all_data_summary$active <- with(all_data_summary, max > q95.background)
+all_data_summary$repressed <- with(all_data_summary, min < q05.background.min)
+
+
+perc.active <- ddply(subset(all_data_summary, ControlType != "ScrambleTFBS"), "Library", summarise,
+                     n_active = mean(active), n_repressed = mean(repressed))
+perc.active <- melt(perc.active, measure.vars = c("n_active", "n_repressed"))
+
+
+ggplot(aes(x = Library, y = 100*value, fill= variable), data = perc.active) + 
+  geom_col(position = position_dodge()) + theme_bw() + 
+  scale_fill_manual(values = c("n_repressed" = "#D99BC2", "n_active" = "#8BC6AF"), labels = c("n_active" = "active", "n_repressed" = "repressed"), name = "") +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 45, hjust= 1), axis.title.x = element_blank()) + 
+  xlab("Library") + ylab("% of sequences")
+```
+
+Alternatively, one could also just show what % of observations (sequence-cell state combinations) correspond to a higher-than random activity. The difference between the two barcharts already hints at the observation that LibB is more cell state specific , compared to LibA.
+
+```{r figure2a_alternative, fig.width=2.5,fig.height=2}
+all_bad_sites <- subset(all_data,ControlType != "Library")
+bad_range <- ddply(as.data.frame(all_bad_sites), c("clusterID", "Library"),summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+rownames(bad_range) <- paste(bad_range$Library, bad_range$clusterID)
+
+all_data <- merge(all_data, bad_range)
+all_data$active <- with(all_data, mean.norm.adj > q95.background)
+all_data$repressed <- with(all_data, mean.norm.adj < q05.background)
+
+perc.active <- ddply(subset(all_data, ControlType == "Library"), "Library", summarise,
+                     n_active = mean(active), n_repressed = mean(repressed))
+perc.active <- melt(perc.active, measure.vars = c("n_active", "n_repressed"))
+
+
+
+ggplot(aes(x = Library, y = 100*value, fill= variable), data = perc.active) + 
+  geom_col(position = position_dodge()) + theme_bw() + 
+  scale_fill_manual(values = c("n_repressed" = "#D99BC2", "n_active" = "#8BC6AF"), labels = c("n_active" = "active", "n_repressed" = "repressed"), name = "") +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 45, hjust= 1), axis.title.x = element_blank()) + 
+  xlab("Library") + ylab("% of observations")
+
+```
+
+
+## Cell state specifc activity (Figure 2B)
+
+For each factor or factor or factor combination, determines what % of sequences is more active or repressed ,compared to random background DNA, per cell state. Then, uses a resampling based test to determine if this fraction is significantly larger than what would be expected from random sampling. To make Library A and Library B data comparable, uses a) Library A sequences with at least 3 repeats of medium-strong motifs and b) Library B sequences with 3+3 repeats.
+
+```{r figure2b_upper, fig.width=12,fig.height=4}
+
+libA_use <- subset(mpra.data$HSPC.libA$DATA, affinitynum  >= 0.5 & nrepeats >= 3)
+      
+        bad_range <- ddply(mpra.data$HSPC.libA$CONTROLS.GENERAL, "clusterID",summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+        rownames(bad_range) <- bad_range$clusterID
+        
+        #count sequences falling outside of this range for each factor and cell type
+        active_by_celltype <- ddply(as.data.frame(subset(libA_use, affinitynum > 0.125)), c("TF","clusterID"), summarise,
+                                    n_active = mean(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                    n_repressed = mean(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+        
+        
+        active <- ddply(active_by_celltype, "TF",summarise, 
+                        total_active = mean(n_active), total_repressed = mean(n_repressed),
+                        max_active = max(n_active), max_repressed = max(n_repressed),
+                        var_active = sd(n_active), var_repressed = sd(n_repressed), 
+                        ct_spec_act = max_active - min(n_active), ct_spec_repr = max_repressed -min(n_repressed))
+        
+        
+        #resampling based test
+        n_simulated_tf <- 5000 #arbitrary
+        n_seq_per_tf <-  round(mean(table(libA_use$TF))) #not arbitrary: number of sequences per TF
+        resampled_bad_sites_by_celltype <- mpra.data$HSPC.libA$CONTROLS.GENERAL[sample(1:nrow( mpra.data$HSPC.libA$CONTROLS.GENERAL), n_simulated_tf * n_seq_per_tf,replace = T),]
+        resampled_bad_sites_by_celltype$TF <- rep(1:n_simulated_tf, each = n_seq_per_tf)
+        resampled_bad_sites_by_celltype <- ddply(as.data.frame(resampled_bad_sites_by_celltype), c("TF","clusterID"), summarise,
+                                                 n_active = mean(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                                 n_repressed = mean(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+        
+        bad_sites_summary <- ddply(resampled_bad_sites_by_celltype, "TF",summarise, 
+                                   total_active = mean(n_active), total_repressed = mean(n_repressed),
+                                   max_active = max(n_active), max_repressed = max(n_repressed),
+                                   var_active = sd(n_active), var_repressed = sd(n_repressed))
+        
+        lines_act <- quantile(bad_sites_summary$max_active, c(0.025,0.975))
+        lines_rep <- quantile(bad_sites_summary$max_repressed, c(0.025,0.975))
+        
+          lines_by_celltype <- ddply(resampled_bad_sites_by_celltype, "clusterID", summarise,
+                                     lower_act = quantile(n_active, c(0.025)),
+                                     lower_rep = quantile(n_repressed, c(0.025)),
+                                     upper_act = quantile(n_active, c(0.975)),
+                                     upper_rep = quantile(n_repressed, c(0.975)))
+          
+          info <- sapply(names(cellstate.map), function(cs) mean(subset(active_by_celltype, TF == "Mecom" & clusterID == cs)$n_repressed> subset(resampled_bad_sites_by_celltype, clusterID == cs)$n_repressed))
+          
+          active_by_celltype <- merge(active_by_celltype, lines_by_celltype, by = "clusterID")
+          active_by_celltype$sig_active <- with(active_by_celltype, n_active > upper_act)
+          active_by_celltype$sig_repressed <- with(active_by_celltype, n_repressed > upper_rep)
+          active_by_celltype$p_active <- with(active_by_celltype, n_active > upper_act)
+          active_by_celltype$p_repressed <- with(active_by_celltype, n_repressed > upper_rep)
+          
+  
+    active_by_celltype_libA <- active_by_celltype
+    
+    
+### Determine above background seq on LibH combo by combo - 3+3 TFBS only####
+      
+      all_bad_sites <- subset(mpra.data$HSPC.libB$CONTROLS.GENERAL, ControlType %in% c("ScrambleTFBS") )
+      bad_range <- ddply(as.data.frame(all_bad_sites), "clusterID",summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+      rownames(bad_range) <- bad_range$clusterID
+      
+      final.crs.filtered <- mpra.data$HSPC.libB$DATA
+      final.crs.filtered$tf1 <- ifelse(final.crs.filtered$TF1.name > final.crs.filtered$TF2.name,final.crs.filtered$TF1.name, final.crs.filtered$TF2.name )
+      final.crs.filtered$tf2 <- ifelse(final.crs.filtered$TF1.name > final.crs.filtered$TF2.name,final.crs.filtered$TF2.name, final.crs.filtered$TF1.name )
+      final.crs.filtered$tfcombo <- paste(final.crs.filtered$tf1, final.crs.filtered$tf2, sep="-")
+      
+      
+      #include tp53 only here.
+      final.crs.filtered <- subset(final.crs.filtered,select = c("mean.norm.adj","tfcombo", "clusterID"),TFnumber == 3)
+      
+      
+      active_by_celltype <- ddply(as.data.frame(final.crs.filtered), c("tfcombo","clusterID"), summarise,
+                                  n_active = mean(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                  n_repressed = mean(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+      
+      
+      active_m <- ddply(active_by_celltype, "tfcombo",summarise, 
+                      total_active = mean(n_active), total_repressed = mean(n_repressed),
+                      max_active = max(n_active), max_repressed = max(n_repressed),
+                      var_active = sd(n_active), var_repressed = sd(n_repressed), #for the vatiance need resampling based w random DNA
+                      ct_spec_act = max_active - min(n_active), ct_spec_repr = max_repressed -min(n_repressed))
+      
+      
+      n_simulated_tf <- 1000 #arbitrary
+      n_seq_per_tf <-  round(mean(table(final.crs.filtered$tfcombo))) 
+      resampled_bad_sites_by_celltype <- all_bad_sites[sample(1:nrow(all_bad_sites), n_simulated_tf * n_seq_per_tf,replace = T),]
+      resampled_bad_sites_by_celltype$tfcombo <- rep(1:n_simulated_tf, each = n_seq_per_tf)
+      resampled_bad_sites_by_celltype <- ddply(as.data.frame(resampled_bad_sites_by_celltype), c("tfcombo","clusterID"), summarise,
+                                               n_active = mean(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                               n_repressed = mean(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+      
+      bad_sites_summary <- ddply(resampled_bad_sites_by_celltype, "tfcombo",summarise, 
+                                 total_active = mean(n_active), total_repressed = mean(n_repressed),
+                                 max_active = max(n_active), max_repressed = max(n_repressed),
+                                 var_active = sd(n_active), var_repressed = sd(n_repressed))
+      
+      lines_by_celltype <- ddply(resampled_bad_sites_by_celltype, "clusterID", summarise,
+                                 lower_act = quantile(n_active, c(0.025)),
+                                 lower_rep = quantile(n_repressed, c(0.025)),
+                                 upper_act = quantile(n_active, c(0.975)),
+                                 upper_rep = quantile(n_repressed, c(0.975)))
+      active_by_celltype <- merge(active_by_celltype, lines_by_celltype, by = "clusterID")
+      active_by_celltype$sig_active <- with(active_by_celltype, n_active > upper_act)
+      active_by_celltype$sig_repressed <- with(active_by_celltype, n_repressed > upper_rep)
+      
+active_by_celltype_libH <- active_by_celltype
+active_by_celltype_libA$tfcombo <- active_by_celltype_libA$TF
+use.col <- intersect(colnames(active_by_celltype_libH), colnames(active_by_celltype_libA))
+
+
+
+combined <- rbind(active_by_celltype_libH[,use.col], active_by_celltype_libA[,use.col])
+
+
+heptad <- unique(c(mpra.data$HSPC.libB$DATA$TF1.name, mpra.data$HSPC.libB$DATA$TF2.name))
+
+combined$faceting <- factor(
+  with(combined,  ifelse(tfcombo %in% heptad,"Set 1 (single f.)",ifelse(!grepl("-",tfcombo), "Set 2 (single factors)", ifelse(grepl("Trp53", tfcombo), "Trp53 (pairs)", "Set 1 (pairs)")))),
+  levels = c("Set 1 (single f.)", "Set 1 (pairs)", "Set 2 (single factors)","Trp53 (pairs)"))
+
+
+
+#for ordering the TFs/TF combos on the x axis (and only for that purpose), I use some computations done on a
+#specificity score that was not used anywhere else in the final version of the MS (maybe rather sort them alphabetically in final-final version of MS?)
+julia_specificty <- readRDS("additional_data/Figure2_specificityScores.RDS") #copied from /users/lvelten/project/SCG4SYN/AnalysisWorkPackages/T5_cellStateSpecificity/002_comparison_A_and_H/
+julia_specificty$tfflipped <- gsub("([^-]+)-([^-]+)", "\\2-\\1", julia_specificty$TF)
+julia_specificty$tfcombo <- with(julia_specificty, ifelse(TF %in% combined$tfcombo, TF, tfflipped))
+julia_specificty$tfcombo[julia_specificty$tfcombo == "(Intercept)"] <- "Cebpa"
+julia_specificty$coeff.lm[julia_specificty$tfcombo == "Cebpa"] <- 0
+julia_specificty$class[julia_specificty$tfcombo == "Cebpa"] <- "activator"
+julia_specificty <- subset(julia_specificty, tfcombo != "mean.exp")
+combined$tfcombo <- factor(combined$tfcombo, levels = julia_specificty$tfcombo[order(julia_specificty$coeff.lm, decreasing = T)])
+
+
+
+qplot(x = tfcombo, fill = 100*n_active, y = clusterID, data = subset(combined, clusterID != "State_9K" &tfcombo != "Trp53" & faceting != "Trp53 (pairs)"), geom="tile")+ 
+  theme_bw(base_size=14) + theme(panel.grid = element_blank(), axis.text.x = element_text(angle=90,vjust=0.5)) +
+  geom_point(shape=16, color = "white", size = 0.5, data =  subset(combined, clusterID != "State_9K" &tfcombo != "Trp53" & faceting != "Trp53 (pairs)" & sig_active)) +
+  scale_fill_gradientn(colors = c("black","red","orange"), limits = c(0,100), name = "% of sequences\nactive") + 
+  scale_size_area(limits = c(0,90), guide=F,max_size = 4.5)+ scale_y_discrete(labels = cellstate.map) + ylab("Cell State") + xlab("TF") + 
+  facet_grid(~faceting, space = "free_x", scales = "free_x")
+
+qplot(x = tfcombo, fill = 100*n_repressed,  y = clusterID, geom="tile", data = subset(combined, clusterID != "State_9K"&tfcombo != "Trp53"& faceting != "Trp53 (pairs)"))+ 
+  theme_bw(base_size=14) + theme(panel.grid = element_blank(), axis.text.x = element_text(angle=90,vjust=0.5)) +
+  geom_point(shape=16, color = "white", size = 0.5, data =  subset(combined, clusterID != "State_9K" &tfcombo != "Trp53" & faceting != "Trp53 (pairs)" & sig_repressed)) +
+  scale_fill_gradientn(colors = c("black","blue","green"), limits = c(0,35), name = "% of sequences\nrepressed", oob = scales::squish) + 
+  scale_size_area(limits = c(0,35), guide=F,max_size = 4.5)+ scale_y_discrete(labels = cellstate.map) + ylab("Cell State") + xlab("TF") + 
+  facet_grid(~faceting, space = "free_x", scales = "free_x")
+
+
+```
+
+Finally, classify TFs as activators, repressors or dual factors, depending on their behavior across lineages.
+
+```{r figure2b_lower, fig.width=10,fig.height=2}
+
+
+forsummary <- subset(combined, clusterID != "State_9K")
+summary <- ddply(forsummary, c("tfcombo", "faceting"), summarise, class = factor(
+  ifelse(any(sig_repressed), ifelse(any(sig_active), "dual", "repressor"), ifelse(any(sig_active), "activator", "other")),
+  levels = c("activator", "dual", "repressor", "other")), mean_act = mean(n_active), mean_repr = mean(n_repressed))
+# summary$class[summary$tfcombo == "Rxrg"] <- "repressor"
+# summary$class[summary$tfcombo == "Gfi1b-Runx1"] <- "other"
+qplot(x = tfcombo, fill = class,  y = 1, geom="tile", data = subset(summary, tfcombo != "Trp53"& faceting != "Trp53 (pairs)"))+ 
+  theme_bw(base_size=14) + theme(panel.grid = element_blank(), axis.text.x = element_text(angle=90,vjust=0.5),axis.text.y = element_blank(), axis.title.y = element_blank(), legend.position = "none", axis.ticks.y = element_blank()) +
+  scale_fill_manual(values = c("repressor"= "#E78AC3", "dual"= "#FC8D62","other"= "#8DA0CB","activator"=  "#66C2A5"))+
+  facet_grid(~faceting, space = "free_x", scales = "free_x")
+
+saveRDS(summary, "Figure2_TF_classification.rds")
+saveRDS(active, "Figure2_TF_activity.rds")
+saveRDS(combined, "Figure2_TF_data.rds")
+
+```
+
+## Correlations in cell state specifc activity (Figure 2C)
+
+```{r figure2c, fig.width=4, fig.height=4}
+
+activation <- acast(subset(combined, !grepl("Trp53", tfcombo)), tfcombo ~ clusterID, value.var = "n_active")
+repression <- acast(subset(combined, !grepl("Trp53", tfcombo)), tfcombo ~ clusterID, value.var = "n_repressed")
+is.libH <- grepl("-", rownames(activation))
+
+gethm <- function(x, ...) {
+  cors <- cor(x)
+  d <- as.dist(1-cors)
+  pheatmap(cors, clustering_distance_cols = d, clustering_distance_rows = d, breaks = seq(0,1, length.out=101), ...)
+  
+}
+cellstate.map <- c(cellstate.map, "State_9K" = "K562")
+cellstate.map["State_5M"] <- "Monocyte P."
+colnames(activation) <- cellstate.map[colnames(activation)]
+colnames(repression) <- cellstate.map[colnames(repression)]
+is.k562 <- colnames(activation) == "K562"
+is.heptad <- grepl(paste(heptad, collapse = "|"), rownames(activation)) & rownames(activation) != "Trp53"
+gethm(activation[!is.libH,!is.k562], main = "Single factors, ability to activate")
+gethm(activation[is.libH & is.heptad,!is.k562], main = "Pairs, ability to activate")
+
+gethm(repression[!is.libH,!is.k562], main = "Single factors, ability to repress")
+
+
+```
+
+```{r sinfo}
+print(sessionInfo())
+```

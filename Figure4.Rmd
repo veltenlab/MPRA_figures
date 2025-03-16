@@ -1,0 +1,223 @@
+---
+title: "Figure 4"
+author: "Robert Froemel & Lars Velten"
+date: "2025-02-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data from figshare
+
+Also load classification from Figure 2B (see notebook Figure2.Rmd)
+
+```{r load_data}
+load(url("https://figshare.com/ndownloader/files/53009321"))
+summary <- readRDS("Figure2_TF_classification.rds")
+combined <- readRDS("Figure2_TF_data.rds")
+
+```
+
+```{r load_packages, warning=F, message=F}
+require(ggplot2)
+require(ggrepel)
+require(plyr)
+require(reshape2)
+require(gridExtra)
+```
+
+## Figure 4A
+
+
+```{r fig4a, fig.width=3.3, fig.height=2.2}
+pairs <- subset(summary, grepl("-", tfcombo))
+pairs$TF1 <- gsub("-.+", "", pairs$tfcombo)
+pairs$TF2 <- gsub(".+-", "", pairs$tfcombo)
+pairs_reversed <- pairs
+pairs_reversed$TF1 <- pairs$TF2
+pairs_reversed$TF2 <- pairs$TF1
+pairs <- rbind(pairs, pairs_reversed)
+pairs$class <- factor(pairs$class, levels = rev(c("dual", "activator", "repressor", "other")))
+dual.by.tf <- sapply(unique(pairs$TF1), function(tf) sum(pairs$class[pairs$TF1 == tf] == "dual"))
+pairs$TF1 <- factor(pairs$TF1, levels = names(dual.by.tf)[order(dual.by.tf, decreasing = T)])
+pairs$TF2 <- factor(pairs$TF2, levels = names(dual.by.tf)[order(dual.by.tf, decreasing = T)])
+
+ggplot(aes(x= TF1, y = TF2, color = class),data = pairs) + geom_point() +
+  scale_color_manual(values = c("repressor"= "#E78AC3", "dual"= "#FC8D62","other"= "#8DA0CB","activator"=  "#66C2A5"), "Classification\nof motif pair\n(Fig. 2B)")+
+  theme_bw() + theme(panel.grid = element_blank(), axis.text.x = element_text(angle =90)) 
+
+```
+
+## Figure 4B
+
+```{r fig4b, fig.width=3.7, fig.height=2.8}
+pairs <- subset(combined, faceting == "Set 1 (pairs)" )
+singles <-subset(combined, faceting == "Set 1 (single f.)" )
+singles$TF1 <- singles$tfcombo
+singles$TF2 <- singles$tfcombo
+pairs$TF1 <- gsub("-.+", "", pairs$tfcombo)
+pairs$TF2 <- gsub(".+-", "", pairs$tfcombo)
+
+pairs <- merge(pairs, subset(singles, select = c("clusterID", "TF1", "n_active", "n_repressed")), by = c("clusterID", "TF1"), suffixes = c("", ".TF1"))
+pairs <- merge(pairs, subset(singles, select = c("clusterID", "TF2", "n_active", "n_repressed")), by = c("clusterID", "TF2"), suffixes = c("", ".TF2"))
+pairs.summary <- ddply(pairs, c("tfcombo", "TF1", "TF2"), summarise, 
+                       act_mean = mean(n_active),act_mean.TF1 = mean(n_active.TF1),act_mean.TF2 = mean(n_active.TF2),
+                       rep_mean = mean(n_repressed),rep_mean.TF1 = mean(n_repressed.TF1),rep_mean.TF2 = mean(n_repressed.TF2))
+tfcolor <- readRDS( "additional_data/006_tfcolor.RDS")
+
+qplot(x = 100*(rep_mean.TF1 +  rep_mean.TF2)/2, data= pairs.summary, y = 100*rep_mean, color = TF1, size = I(3)) + 
+  geom_point(aes(color= TF2)) + 
+  scale_color_manual(values= tfcolor) + theme_bw() + theme(panel.grid = element_blank()) +
+  xlab("Factor 1 + factor 2") + ylab("Factor combination")  + 
+  geom_text_repel(aes(label = tfcombo),data = subset(pairs.summary, rep_mean > 0.07 ) , color = "black")
+```
+
+## Figure 4C,D
+
+* Panel C is reproduced from figure 2B
+
+* Panel D: see separate R markdown
+
+## Figure 4E
+
+```{r fig4e, fig.width=3.2, fig.height=1.8}
+
+
+getsubset <- function(tfx, tfy) {
+  current <- subset(mpra.data$HSPC.libB$DATA, (TF1.name == tfx & TF2.name == tfy )|( TF2.name == tfx & TF1.name == tfy))
+  new.TF1.aff <- with(current, ifelse(TF1.name == tfx, TF1.affinity, TF2.affinity))
+  new.TF2.aff <- with(current, ifelse(TF1.name == tfx, TF2.affinity, TF1.affinity))
+  new.TF1.ori <- with(current, ifelse(TF1.name == tfx, TF1.orientation, TF2.orientation))
+  new.TF2.ori <- with(current, ifelse(TF1.name == tfx, TF2.orientation, TF1.orientation))
+  current$TF1.affinity <- new.TF1.aff
+  current$TF2.affinity <- new.TF2.aff
+  current$TF1.orientation <- new.TF1.ori
+  current$TF2.orientation <- new.TF2.ori
+  current$TF1.name <- tfx
+  current$TF2.name <- tfy
+  current$affsum <- current$TF1.affinity * current$TFnumber + current$TF2.affinity * current$TFnumber
+  current$affsum1 <- current$TF1.affinity * current$TFnumber 
+  current$affsum2 <- current$TF2.affinity * current$TFnumber
+  
+  current$combined <- factor(sprintf("%d%s-%d%s", current$TFnumber, ifelse(current$TF1.affinity == 0.55,"W","S"),
+                                     current$TFnumber, ifelse(current$TF2.affinity == 0.55,"W","S")),
+                             levels = c("1W-1W","1W-1S","1S-1W","1S-1S","3W-3W","3S-3W","3W-3S","3S-3S"))
+  
+  return(current)
+  
+}
+
+Fli1.Spi1 <- subset(getsubset("Fli1", "Spi1"), TFnumber == 3 & clusterID != "State_1M" & clusterID != "State_6N") #exclude cell states where there is no repression
+
+scolors <-  c("3S-3S" = "black",    "3W-3S" = "#763931"  ,   "3W-3W" = "#F1AB00"  , "3S-3W" = "#CD1E10" )
+slab <-  c("3S-3S" = "Strong-Strong",    "3W-3S" = "Weak-Strong"  ,   "3W-3W" = "Weak-Weak"  , "3S-3W" = "Strong-Weak" )
+
+summarised <- ddply(subset(Fli1.Spi1, TForder == "Alternate"), c("combined", "spacer"), summarise, n = length(spacer), m = mean(mean.scaled.final), sd = sd(mean.scaled.final), sem = sd/sqrt(n))
+
+a <- ggplot(aes(x = spacer, y = mean.scaled.final, color = combined),data = subset(Fli1.Spi1, TForder == "Alternate")) +
+  geom_hline(yintercept=0, linetype=2) + 
+    geom_smooth(method="loess", span=1,se=F)+ 
+  #stat_summary(fun.y = mean , fun.ymin = function(x) mean(x)-sd(x)/sqrt(length(x)), fun.ymax = function(x) mean(x)+sd(x)/sqrt(length(x)))+
+  theme_bw() + theme(panel.grid = element_blank()) +ylab("Activity") + xlab("Spacing between sites") + 
+  scale_color_manual(values = scolors, name = "Binding site\nstrength" , labels = slab) + geom_point(aes(y = m),data = summarised, size=0.5) +
+  geom_linerange(aes(ymin = m-sem, ymax=m+sem,y=m),data = summarised,alpha=0.5)
+print(a)
+```
+
+```{r fig4epdf, include=FALSE}
+pdf("panels/figure4e.pdf", width=3.2, height=1.6)
+print(a)
+dev.off()
+```
+
+## Figure 4H,I
+
+```{r fig4g_smooth, fig.width = 3,fig.height=2}
+Set2 <- subset(mpra.data$HSPC.libF$DATA, nFli1 > 0 & nSpi1 > 0 & spacer ==10)
+Set2$nsites <-  (Set2$nFli1 + Set2$nSpi1)
+
+get_2d_smooth <- function(x,y,z,span=0.75, npoints=50) {
+  newx <- rep(seq(min(x), max(x), length.out = npoints), each = npoints)
+  newy <- rep(seq(min(y), max(y), length.out = npoints), npoints)
+  m <- loess(z ~x + y, span = span)
+  out <- data.frame(x = newx, y = newy)
+  out$smooth <- predict(m, newdata = out)
+  out$dist.covered <- sapply(1:nrow(out), function(i) min((out$x[i] - x)^2 + (out$y[i] - y )^2))
+  out
+
+}
+
+smoothened_picked <- with(Set2, get_2d_smooth(Spi1_affinities_sum, Fli1_affinities_sum, mean.norm.adj, span = 0.75, npoints = 100))
+
+qplot(x = x, y= y, color = smooth, data = subset( smoothened_picked, (0.8*x+y < 100 & 0.8*x+y > 50 ))) +
+  #geom_point(aes(x = Spi1_affinities_sum, y= Fli1_affinities_sum), data= Set2, color = "black", size=0.1)+
+   scale_color_gradient2(low = "blue", mid = "lightgrey", high = "red", oob = scales::squish, name = "Activity",limits = c(-0.5,0.75)) +
+  theme_bw( ) + theme(panel.grid = element_blank()) + xlab("Spi1 - sum of affinities") + ylab("Fli1 - sum of affinities")
+
+```
+
+```{r fig4g_box, fig.width = 1.5,fig.height=2}
+Set2 <- subset(mpra.data$HSPC.libF$DATA, nFli1 > 0 & nSpi1 > 0 & spacer== 10)
+Set2$nsites <-  (Set2$nFli1 + Set2$nSpi1)
+add.p <- data.frame(nSpi1 = 1:8, p = sapply(1:8, function(i) with(subset(Set2, nsites == 9), wilcox.test(mean.scaled.final[nSpi1 == i],mean.scaled.final[nSpi1 != i] ))$p.value),
+                    effect = sapply(1:8, function(i) with(subset(Set2, nsites == 9), mean(mean.scaled.final[nSpi1 == i]) > mean(mean.scaled.final[nSpi1 != i] ))))
+add.p$class <- with(add.p, ifelse( p < 0.05 , ifelse(effect, "active","repressed" ), "n.s."))
+forplot <-  subset(Set2, nsites == 9)
+forplot <- merge(forplot, add.p)
+
+a <- qplot(y = mean.scaled.final, data = forplot, color = class, x = as.factor(nSpi1), geom = "boxplot") + theme_bw() + theme(legend.position = "none", panel.grid = element_blank()) + 
+  ylab("Activity") + geom_hline(yintercept = 0, linetype=3)  + scale_x_discrete() + xlab("Spi1 sites,\nof 9 total sites") + scale_y_continuous(limits = c(-0.25,0.5), oob = scales::squish, breaks = c(-0.25,0,0.25,0.5), labels = c("-0.25", "0.00", "0.25", ">0.5")) +
+  scale_color_manual(values = c( "repressed" = "blue", "n.s." = "grey30", active = "red"), name = "")
+print(a)
+
+
+```
+
+```{r fig4g_box_pdf}
+pdf("panels/figure4g.pdf",width = 1.5,height=2)
+print(a)
+dev.off()
+```
+```{r fig4i_smooth, fig.width = 3,fig.height=2}
+Set2 <- subset(mpra.data$HSPC.libF$DATA, nCebpa > 0 & nGata2 > 0& spacer ==4 &  clusterID %in% c("State_2D","State_3E", "State_4M","State_7M")  ) #exclude cell states where Cebpa/Gata2 never results in repression
+Set2$nsites <-  (Set2$nCebpa + Set2$nGata2)
+
+smoothened_picked <- with(Set2,get_2d_smooth(Cebpa_affinities_sum, Gata2_affinities_sum, mean.norm.adj, span = 0.75, npoints = 100))
+
+
+qplot(x = x, y= y, color = smooth, data = subset( smoothened_picked, (0.95*x+y < 80 & 0.95*x+y > 50))) + 
+  #geom_point(aes(x = Spi1_affinities_sum, y= Fli1_affinities_sum), data= Set2, color = "black", size=0.1)+
+  scale_color_gradientn(colors=c("#C4B5DC","lightgrey","#DDC7C1"), name = "Activity") +
+  theme_bw( ) + theme(panel.grid = element_blank()) + xlab("Cebpa - sum of affinities") + ylab("Gata2 - sum of affinities")
+
+```
+
+```{r fig4i_box, fig.width = 1.5,fig.height=2}
+raw_picked <- Set2
+
+add.p <- data.frame(nCebpa = 1:8, p = sapply(1:8, function(i) with(subset(raw_picked, nsites == 9), wilcox.test(mean.scaled.final[nCebpa == i],mean.scaled.final[nCebpa != i] ))$p.value),
+                    effect = sapply(1:8, function(i) with(subset(raw_picked, nsites == 9), mean(mean.scaled.final[nCebpa == i]) > mean(mean.scaled.final[nCebpa != i] ))))
+add.p$class <- with(add.p, ifelse( p < 0.05 , ifelse(effect, "active","repressed" ), "n.s."))
+
+forplot <-  subset(raw_picked, nsites == 9)
+forplot <- merge(forplot, add.p)
+
+a <-qplot(y = mean.scaled.final, data = forplot, color = class, x = as.factor(nCebpa), geom = "boxplot") + theme_bw() + theme(legend.position = "none", panel.grid = element_blank()) + 
+  ylab("Activity") + geom_hline(yintercept = 0, linetype=3)  + scale_x_discrete() + xlab("Cebpa sites,\nof 9 total sites") + scale_y_continuous(limits = c(-0.25,0.5), oob = scales::squish, breaks = c(-0.25,0,0.25,0.5), labels = c("-0.25", "0.00", "0.25", ">0.5")) +
+  scale_color_manual(values = c( "repressed" = "blue", "n.s." = "grey30", active = "red"), name = "")
+print(a)
+
+
+```
+
+```{r fig4i_box_pdf}
+pdf("panels/figure4i.pdf",width = 1.5,height=2)
+print(a)
+dev.off()
+```
+
+```{r sinfo}
+print(sessionInfo())
+```

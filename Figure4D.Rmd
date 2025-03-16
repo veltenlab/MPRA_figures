@@ -1,0 +1,192 @@
+---
+title: "Figure 4D"
+author: "Robert Froemel & Lars Velten"
+date: "2025-03-12"
+output: html_document
+---
+
+
+```{r LoadPackages, warning=FALSE, message=FALSE, results='hide'}
+suppressPackageStartupMessages({
+  require(ggplot2)
+  require(ggrepel)
+  require(ranger)
+  require(parallel)
+  require(plyr)
+  require(dplyr)
+  require(wCorr)
+  require(parsnip)
+  require(tidyr)
+  require(tibble)
+  require(viridis)
+  require(parsnip)
+  require(tidymodels)
+  library(doParallel)
+})
+```
+
+```{r ReadData, warning=FALSE, message=FALSE, results='hide'}
+load(url("https://figshare.com/ndownloader/files/53009321"))
+set.seed(1234)
+```
+
+## Train machine learning models
+
+```{r}
+cl <- makePSOCKcluster(10)
+registerDoParallel(cl)
+```
+
+```{r}
+swap_values <-  function(df) {
+  df$FirstTF <- df$TF1.name
+  new.TF1 <- with(df, ifelse(TF1.name > TF2.name, TF1.name,TF2.name))
+  new.TF2 <- with(df, ifelse(TF1.name > TF2.name, TF2.name,TF1.name))
+  new.TF1.aff <- with(df, ifelse(TF1.name > TF2.name, TF1.affinity,TF2.affinity))
+  new.TF2.aff <- with(df, ifelse(TF1.name > TF2.name, TF2.affinity,TF1.affinity))
+  new.TF1.ori <- with(df, ifelse(TF1.name > TF2.name, TF1.orientation,TF2.orientation))
+  new.TF2.ori <- with(df, ifelse(TF1.name > TF2.name, TF2.orientation,TF1.orientation))
+  df$TF1.name <- new.TF1
+  df$TF2.name <- new.TF2
+  df$TF1.affinity <- new.TF1.aff
+  df$TF2.affinity <- new.TF2.aff
+  df$TF1.orientation <- new.TF1.ori
+  df$TF2.orientation <- new.TF2.ori
+  df$TFnumber <- 2*df$TFnumber
+  return(df)
+} 
+```
+
+```{r ChangeFullDF}
+Library_input <- subset(mpra.data$HSPC.libB$DATA, select = c("CRS", "Seq","clusterID","mean.scaled.final","TFnumber", "TForder","TF1.name", "TF1.affinity", "TF1.orientation", "TF2.name", "TF2.affinity", "TF2.orientation", "spacer"))
+Library_input<- swap_values(Library_input)
+```
+
+Specify and train different machine learning models
+
+```{r Parameters}
+# RF parameters
+rf_model <- rand_forest(mtry = NULL, trees = 500) %>%
+      set_engine("ranger", importance = "none") %>%
+      set_mode("regression") 
+
+#Set Option for keeping predictions and saveing the workflow
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+Grammar_formula <- mean.scaled.final ~ TFnumber + TF1.name + TF2.name + TF1.affinity + TF2.affinity + spacer + TForder + TF1.orientation + TF2.orientation + clusterID
+
+noGramamar_formula <-  mean.scaled.final ~ TFnumber + TF1.name + TF2.name + TF1.affinity + TF2.affinity + clusterID
+
+data_folds <- group_vfold_cv(Library_input, v = 10, repeats = 10, group = "CRS")
+#data_folds <- group_vfold_cv(Library_input, v = 2, repeats = 5, group = "CRS")
+```
+
+```{r FullModelGrammar}
+rf_Grammar <- 
+      workflow() %>% 
+      add_formula(Grammar_formula) %>% 
+      add_model(rf_model) %>% 
+  fit_resamples(resamples = data_folds, control = keep_pred)
+```
+
+```{r FullModelnoGrammar}
+rf_noGrammar <- 
+      workflow() %>% 
+      add_formula(noGramamar_formula) %>% 
+      add_model(rf_model) %>% 
+  fit_resamples(resamples = data_folds, control = keep_pred)
+```
+
+
+```{r SaveFullModel}  
+model_set <- as_workflow_set(rf_Grammar = rf_Grammar,  rf_noGrammar = rf_noGrammar)
+
+#save(model_set, data_folds, file="Figure4D_models.rda")
+```
+
+## Compute p values and draw figure
+
+```{r fig4d, fig.width=6, fig.height=4.5}
+
+Library_input <- subset(mpra.data$HSPC.libB$DATA, select = c("CRS", "Seq","clusterID","mean.scaled.final","TFnumber", "TForder","TF1.name", "TF1.affinity", "TF1.orientation", "TF2.name", "TF2.affinity", "TF2.orientation", "spacer"))
+Library_input<- swap_values(Library_input)
+
+output_df <- do.call(rbind, lapply(1:length(model_set$wflow_id), function(x) {do.call(rbind, lapply(1:length(model_set$result[[x]]$.predictions), function(i) {temp <- model_set$result[[x]]$.predictions[[i]]; temp$id <- model_set$result[[x]]$id[[i]]; temp$id2 <- model_set$result[[x]]$id2[[i]]; temp$wflow_id <- model_set$wflow_id[x]; temp}))}))
+
+Library_merge <- merge(output_df , Library_input %>% mutate(.row = 1:nrow(.)) )
+Library_merge <- Library_merge %>% filter(wflow_id %in% c("rf_Grammar", "rf_noGrammar"))
+
+# Calculate overall R2 for each model and factor combo
+merged_summary <- Library_merge %>%
+  dplyr::group_by(TF1.name, TF2.name, wflow_id) %>%
+  dplyr::summarise(R2 = cor(.pred, mean.scaled.final)^2) %>%
+  pivot_wider(., names_from = wflow_id, values_from = R2)  %>%
+  ungroup() %>% rowwise() %>%
+  mutate(GrammarDiff = rf_Grammar - rf_noGrammar) %>%
+  ungroup()
+
+# calculate the 100 R2 for each TF combo (10x nested times 10x CV) and then perform t.test based on: https://www.tmwr.org/compare Chapter 11.3
+outcome_test <- Library_merge %>%
+  dplyr::group_by(TF1.name, TF2.name, wflow_id, id, id2) %>%
+  dplyr::summarise(R2 = cor(.pred, mean.scaled.final)^2) %>%
+  pivot_wider(id_cols = c("TF1.name", "TF2.name", "id", "id2"), names_from = "wflow_id", values_from = "R2") %>%
+  ungroup() %>%
+  dplyr::group_by(TF1.name, TF2.name) %>%
+  dplyr::summarise(p_value_Grammar = t.test(rf_Grammar, rf_noGrammar, alternative = "greater", paired = T)$p.value)
+
+
+#Merge output
+merged_summary <- merge(merged_summary, outcome_test)
+
+#Re-frame DF
+robert_rf <- merged_summary %>%
+  pivot_longer(cols = c(rf_Grammar, rf_noGrammar), names_to = "model", values_to = "R2") %>%
+  pivot_longer(cols = c(GrammarDiff), names_to = "DifferenceModels", values_to = "R2_diff") %>%
+  pivot_longer(cols = c(p_value_Grammar), names_to = "PValueModel", values_to = "p_value") %>%
+  filter(DifferenceModels %in% "GrammarDiff" & PValueModel %in% "p_value_Grammar")
+
+# Manipulate DF for plot
+colnames(robert_rf)[1:2] <- c("TF1", "TF2")
+robert_rf_flipped <- robert_rf
+robert_rf_flipped$TF1 <- robert_rf$TF2
+robert_rf_flipped$TF2 <- robert_rf$TF1
+robert_rf <- rbind(robert_rf, robert_rf_flipped)
+
+#tflevels <- c("Cebpa","Spi1", "Trp53", "Fli1","Lyl1", "Gata1","Gata2", "Gfi1b", "Runx1", "Meis1")
+tflevels <- c("Cebpa","Gata2", "Fli1", "Runx1", "Meis1","Spi1","Gata1", "Lyl1", "Gfi1b", "Trp53")
+
+robert_rf$TF1 <- factor(robert_rf$TF1, levels = tflevels)
+robert_rf$TF2 <- factor(robert_rf$TF2, levels = tflevels)
+
+robert_rf$R2_diff_squish <- with(robert_rf, ifelse(R2_diff < 0, 0, R2_diff))
+
+
+robert_rf$p.signif <- ifelse(robert_rf$p_value > 0.05, " ", ifelse(robert_rf$p_value < 0.01, ifelse(robert_rf$p_value < 0.001, "***", "**"), "*"))
+robert_rf$group1 <- robert_rf$TF1
+robert_rf$group2 <- robert_rf$TF2
+
+ggplot(aes(x = TF1, y = TF2 ), data = subset(robert_rf, as.integer(TF2) > as.integer(TF1)))  + 
+  geom_point(aes(color = 100*R2_diff_squish, size = R2)) +
+  theme_bw() + 
+  theme(panel.grid = element_blank(), axis.text = element_text(size=12), axis.text.x = element_text(angle=90, vjust=0.5,hjust=0)) +
+  scale_x_discrete(name = "", limits = levels(robert_rf$TF1), position = "top") + scale_y_discrete(name = "", limits = levels(robert_rf$TF1)) + 
+  scale_color_gradientn(name = "% Variance explained (grammar)", colours = c("black","red","orange")) +
+  scale_size_continuous(name = "% Variance explained (total)",range = c(1.5,6) ) + 
+  geom_text(aes(label = p.signif),  position = position_nudge(y = 0.3))
+```
+
+
+```{r, include=FALSE}
+
+pdf("panels/figure4d.pdf",width=4.5,height = 4.5)
+ggplot(aes(x = TF1, y = TF2 ), data = subset(robert_rf, as.integer(TF2) > as.integer(TF1)))  + 
+  geom_point(aes(color = 100*R2_diff_squish, size = R2)) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid = element_blank(), axis.text = element_text(size=12), axis.text.x = element_text(angle=90, vjust=0.5,hjust=0), legend.position = "none" ) +
+  scale_x_discrete(name = "", limits = levels(robert_rf$TF1), position = "top") + scale_y_discrete(name = "", limits = levels(robert_rf$TF1)) + 
+  scale_color_gradientn(name = "% Variance explained (grammar)", colours = c("black","red","orange")) +
+  scale_size_continuous(name = "% Variance explained (total)",range = c(1.5,6) ) + 
+  geom_text(aes(label = p.signif),  position = position_nudge(y = 0.3))
+dev.off()
+```
+

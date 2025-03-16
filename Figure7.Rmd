@@ -1,0 +1,464 @@
+---
+title: "Figure 7"
+author: "Robert Froemel & Lars Velten"
+date: "2025-03-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data from figshare
+
+```{r load_data}
+set.seed(1234)
+load(url("https://figshare.com/ndownloader/files/53009321"))
+```
+
+```{r load_packages, warning=F, message=F}
+require(ggplot2)
+require(ggrepel)
+require(plyr)
+require(reshape2)
+require(gridExtra)
+require(ggnewscale)
+require(plotly)
+
+```
+
+
+## Figure 7A
+
+As in figure 2, determine which combinations result in more or less activity, compared to random DNA controls.
+
+```{r fig7a, fig.width = 6.5,fig.height=5.5}
+heptad <- unique(c(mpra.data$HSPC.libB$DATA$TF1.name,unique(mpra.data$HSPC.libB$DATA$TF2.name)))
+
+  final.crs.filtered <- mpra.data$HSPC.libC.aggregate$DATA
+  all_bad_sites <-  subset(mpra.data$HSPC.libC.aggregate$CONTROLS.GENERAL,  ControlType %in% c("ScrambleTFBS"))
+  
+  bad_range <- ddply(as.data.frame(all_bad_sites), "clusterID",summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+  rownames(bad_range) <- paste(bad_range$clusterID, bad_range$Library, sep="_")
+  
+  
+  final.crs.filtered$tf1 <- with(final.crs.filtered, ifelse(TF1.name < TF2.name, TF1.name, TF2.name))
+  final.crs.filtered$tf2 <- with(final.crs.filtered, ifelse(TF1.name < TF2.name, TF2.name, TF1.name))
+  
+  final.crs.filtered$tfcombo <- paste(final.crs.filtered$tf1, final.crs.filtered$tf2, sep="-")
+  final.crs.filtered$nrepeats <-  final.crs.filtered$TFnumber
+  
+  final.crs.filtered <- subset(final.crs.filtered,select = c("mean.norm.adj","tfcombo", "clusterID"))
+  
+  active_by_celltype_sum <- ddply(as.data.frame(final.crs.filtered), c("tfcombo"), summarise,
+                                  n_obs_bylib = length(mean.norm.adj),
+                                  n_active_bylib = sum(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                  n_repressed_bylib = sum(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+  
+  
+  active_m_separate <- ddply(active_by_celltype_sum, c("tfcombo"),summarise, 
+                             n_obs_total = sum(n_obs_bylib),
+                             max_active = max(n_active_bylib/n_obs_bylib), max_repressed = max(n_repressed_bylib/n_obs_bylib),
+                             total_active = sum(n_active_bylib)/n_obs_total, 
+                             total_repressed = sum(n_repressed_bylib)/n_obs_total)
+  
+  active_by_celltype <- ddply(active_by_celltype_sum, c("tfcombo"), summarise,
+                              n_obs = sum(n_obs_bylib),
+                              n_active = sum(n_active_bylib) / n_obs,
+                              n_repressed = sum(n_repressed_bylib) / n_obs)
+  
+  
+  active_m <- ddply(active_by_celltype, "tfcombo",summarise, 
+                    n_obs_total = sum(n_obs),
+                    total_active = mean(n_active), total_repressed = mean(n_repressed),
+                    max_active = max(n_active), max_repressed = max(n_repressed),
+                    var_active = sd(n_active), var_repressed = sd(n_repressed), #for the vatiance need resampling based w random DNA
+                    ct_spec_act = max_active - min(n_active), ct_spec_repr = max_repressed -min(n_repressed))
+  
+  
+  ### Establish background rage ####
+
+  n_simulated_tf <- 1000 #arbitrary
+  n_seq_per_tf <-  round(mean(table(final.crs.filtered$tfcombo)))
+  all_bad_sites_libB <- all_bad_sites
+  resampled_bad_sites_by_celltype_libB <- all_bad_sites_libB[sample(1:nrow(all_bad_sites_libB), n_simulated_tf * n_seq_per_tf,replace = T),]
+  resampled_bad_sites_by_celltype_libB$tfcombo <- rep(1:n_simulated_tf, each = n_seq_per_tf)
+  resampled_bad_sites_by_celltype_libB <- ddply(as.data.frame(resampled_bad_sites_by_celltype_libB), c("tfcombo","clusterID"), summarise,
+                                                n_active = mean(mean.norm.adj > bad_range[unique(clusterID),"q95.background"]),
+                                                n_repressed = mean(mean.norm.adj < bad_range[unique(clusterID),"q05.background"]))
+  
+  bad_sites_summary_libB <- ddply(resampled_bad_sites_by_celltype_libB, "tfcombo",summarise, 
+                                  total_active = mean(n_active), total_repressed = mean(n_repressed),
+                                  max_active = max(n_active), max_repressed = max(n_repressed),
+                                  var_active = sd(n_active), var_repressed = sd(n_repressed))
+  
+  
+  lines_act_libB <- quantile(bad_sites_summary_libB$max_active, c(0.025,0.975))
+  lines_rep_libB <- quantile(bad_sites_summary_libB$max_repressed, c(0.025,0.975))
+  lines_libB <- list(lines_act_libB,lines_rep_libB)
+  active_m_libB <- active_m_separate
+  activators_libB <- active_m_libB$tfcombo[active_m_libB$max_active > lines_act_libB[2]]
+  represssors_libB <- active_m_libB$tfcombo[active_m_libB$max_repressed > lines_rep_libB[2]]
+  
+ 
+  
+  active_m$activator <- active_m$tfcombo %in% activators_libB
+  active_m$repressor <- active_m$tfcombo %in% represssors_libB
+  
+  active_m$class <- with(active_m, ifelse(activator & repressor, "dual", 
+                           ifelse(activator, "activator",
+                                  ifelse(repressor, "repressor","other"))))
+  
+active_m$TF1 <- gsub(".+-","",active_m_libB$tfcombo)
+  active_m$TF2 <- gsub("-.+","",active_m_libB$tfcombo)
+  flipped <- active_m
+  flipped$TF1 <- active_m$TF2
+  flipped$TF2 <- active_m$TF1
+  combined <- rbind(active_m, flipped)
+  
+    saveRDS(active_m, file = "Figure7_TFpairs_HSPC.rds")
+    
+    active_libA <- readRDS("~/cluster/project/SCG4SYN/Manuscript/1_libA_levels_HSC/003_activem_libA_updated.rds")
+  # new_classes <- subset(readRDS("/users/lvelten/project/SCG4SYN/Manuscript/2_libH/003_revised_classification.rds"), !grepl("pairs", faceting), select = c("tfcombo", "class"))
+  # colnames(new_classes)[1] <- "TF"
+  # active_libA <- merge(active_libA[,-13], new_classes)
+  # active_libA$class <- factor(active_libA$class, levels = rev(c("activator","dual","other","repressor")))
+  # saveRDS(active_libA, file = "/users/lvelten/project/SCG4SYN/Manuscript/1_libA_levels_HSC/003_activem_libA_updated.rds")
+levels.tf1 <- readRDS("additional_data/Figure7_TForder.rds")
+combined$TF1 <- factor(combined$TF1, levels = levels.tf1)
+combined$TF2 <- factor(combined$TF2, levels = levels.tf1)  
+
+saveRDS(combined, file = "Figure7_TFpairs_HSPC_full.rds")
+
+a <- ggplot(aes(x = TF1, y = TF2),data = subset(combined, as.integer(TF1)<as.integer(TF2)))  +
+    geom_tile(aes(fill = 100* max_active)) +
+    theme_bw()+ theme(axis.text.x = element_text(angle=90),panel.grid = element_blank(), axis.title = element_blank()) +
+    scale_x_discrete(limits = levels(combined$TF1),position = "top") + scale_y_discrete(limits = levels(combined$TF1))+
+    scale_fill_gradientn(colours = c("black", "red", "orange", "yellow"), limits = c(0,100), name = "% active") + 
+    new_scale_fill() + 
+    geom_tile(aes(fill = 100* max_repressed), data = subset(combined, as.integer(TF1)>as.integer(TF2))) +
+    scale_fill_gradientn(colours = c("black", "blue", "green"), limits = c(0,30), name = "% repressed") +
+    geom_point(shape=16, color = "white", size = 0.5, data =  subset(combined, as.integer(TF1)<as.integer(TF2) & class %in% c("activator", "dual"))) +
+    geom_point(shape=16, color = "white", size = 0.5, data =  subset(combined, as.integer(TF1)>as.integer(TF2) & class %in% c("repressor", "dual"))) +
+    scale_shape_manual(values = c("activator" = 2, "repressor" = 6, "dual" = 3)) #+
+#scale_color_manual(values = c("activator" = "#65C1A4", "dual"="#F68D62", "other"="#8C9DC9", "repressor"="#E28BBB"), name = "Class (combination)")+
+#geom_point(data =subset(combined,TF1.class == "activator" & TF2.class == "activator" & class %in% c("repressor","dual") ), color = "white", size = 3, shape =4) 
+print(a)
+
+```
+
+```{r fig7apdf, include=FALSE}
+pdf("panels/figure7a.pdf", width = 6.5,height=5.5)
+print(a)
+dev.off()
+```
+
+## Figure 7B
+
+```{r fig7b, fig.width = 6.5,fig.height=5.5}
+final.crs.filtered <- mpra.data$K562.libC.minP.tra$DATA
+  
+  all_bad_sites <-  subset( mpra.data$K562.libC.minP.tra$CONTROLS.GENERAL, ControlType %in% c("ScrambleTFBS"))
+  
+  bad_range <- ddply(as.data.frame(all_bad_sites), c("clusterID", "Library"),summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+  rownames(bad_range) <- paste(bad_range$clusterID, bad_range$Library, sep="_")
+  
+  
+  final.crs.filtered$tf1 <- with(final.crs.filtered, ifelse(TF1.name < TF2.name, TF1.name, TF2.name))
+  final.crs.filtered$tf2 <- with(final.crs.filtered, ifelse(TF1.name < TF2.name, TF2.name, TF1.name))
+  
+  final.crs.filtered$tfcombo <- paste(final.crs.filtered$tf1, final.crs.filtered$tf2, sep="-")
+  final.crs.filtered$nrepeats <-  final.crs.filtered$TFnumber
+  
+  final.crs.filtered <- subset(final.crs.filtered,select = c("mean.norm.adj","tfcombo", "clusterID", "Library"))
+  # toadd <- subset(libH.tp53, select = c("mean.norm.adj","clusterID"), nrepeats <= 3 & affinitynum >= 0.5)
+  # toadd$tfcombo <- "Tp53 only"
+  # final.crs.filtered <- rbind(final.crs.filtered, toadd)
+  
+  active_by_celltype_sum <- ddply(as.data.frame(final.crs.filtered), c("tfcombo","clusterID", "Library"), summarise,
+                                  n_obs_bylib = length(mean.norm.adj),
+                                  n_active_bylib = sum(mean.norm.adj > bad_range[paste(unique(clusterID), unique(Library), sep="_"),"q95.background"]),
+                                  n_repressed_bylib = sum(mean.norm.adj < bad_range[paste(unique(clusterID), unique(Library), sep="_"),"q05.background"]))
+  
+  
+  active_m_separate <- ddply(active_by_celltype_sum, c("tfcombo","Library"),summarise, 
+                             n_obs_total = sum(n_obs_bylib),
+                             max_active = max(n_active_bylib/n_obs_bylib), max_repressed = max(n_repressed_bylib/n_obs_bylib),
+                             total_active = sum(n_active_bylib)/n_obs_total, 
+                             total_repressed = sum(n_repressed_bylib)/n_obs_total)
+  
+  active_by_celltype <- ddply(active_by_celltype_sum, c("tfcombo", "clusterID"), summarise,
+                              n_obs = sum(n_obs_bylib),
+                              n_active = sum(n_active_bylib) / n_obs,
+                              n_repressed = sum(n_repressed_bylib) / n_obs)
+  
+  
+  active_m <- ddply(active_by_celltype, "tfcombo",summarise, 
+                    n_obs_total = sum(n_obs),
+                    total_active = mean(n_active), total_repressed = mean(n_repressed),
+                    max_active = max(n_active), max_repressed = max(n_repressed),
+                    var_active = sd(n_active), var_repressed = sd(n_repressed), #for the vatiance need resampling based w random DNA
+                    ct_spec_act = max_active - min(n_active), ct_spec_repr = max_repressed -min(n_repressed))
+  
+  
+  n_simulated_tf <- 1000 #arbitrary
+  n_seq_per_tf <-  round(mean(table(final.crs.filtered$tfcombo)))
+  all_bad_sites_libB <- subset(all_bad_sites, Library == "LibB")
+  resampled_bad_sites_by_celltype_libB <- all_bad_sites_libB[sample(1:nrow(all_bad_sites_libB), n_simulated_tf * n_seq_per_tf,replace = T),]
+  resampled_bad_sites_by_celltype_libB$tfcombo <- rep(1:n_simulated_tf, each = n_seq_per_tf)
+  resampled_bad_sites_by_celltype_libB <- ddply(as.data.frame(resampled_bad_sites_by_celltype_libB), c("tfcombo","clusterID"), summarise,
+                                                n_active = mean(mean.norm.adj > bad_range[paste(unique(clusterID), unique(Library), sep="_"),"q95.background"]),
+                                                n_repressed = mean(mean.norm.adj < bad_range[paste(unique(clusterID), unique(Library), sep="_"),"q05.background"]))
+  
+  bad_sites_summary_libB <- ddply(resampled_bad_sites_by_celltype_libB, "tfcombo",summarise, 
+                                  total_active = mean(n_active), total_repressed = mean(n_repressed),
+                                  max_active = max(n_active), max_repressed = max(n_repressed),
+                                  var_active = sd(n_active), var_repressed = sd(n_repressed))
+  
+  
+  lines_act_libB <- quantile(bad_sites_summary_libB$max_active, c(0.025,0.975))
+  lines_rep_libB <- quantile(bad_sites_summary_libB$max_repressed, c(0.025,0.975))
+  lines_libB <- list(lines_act_libB,lines_rep_libB)
+  active_m_libB <- subset(active_m_separate, Library == "LibB")
+  activators_libB <- active_m_libB$tfcombo[active_m_libB$max_active > lines_act_libB[2]]
+  represssors_libB <- active_m_libB$tfcombo[active_m_libB$max_repressed > lines_rep_libB[2]]
+  
+  
+  active_m$activator <-active_m$tfcombo %in% activators_libB
+  active_m$repressor <-active_m$tfcombo %in% represssors_libB
+  
+
+  active_m$class <- with(active_m, ifelse(activator & repressor, "dual", 
+                           ifelse(activator, "activator",
+                                  ifelse(repressor, "repressor","other"))))
+  
+  
+  saveRDS(active_m, file = "Figure7_TFpairs_K562.rds")
+  
+  active_m$TF1 <- gsub(".+-","",active_m_libB$tfcombo)
+  active_m$TF2 <- gsub("-.+","",active_m_libB$tfcombo)
+  flipped <- active_m
+  flipped$TF1 <- active_m$TF2
+  flipped$TF2 <- active_m$TF1
+  combined <- rbind(active_m, flipped)
+  
+  combined$TF1 <- factor(combined$TF1, levels = levels.tf1)
+combined$TF2 <- factor(combined$TF2, levels = levels.tf1)
+
+saveRDS(combined, file = "Figure7_TFpairs_K562_full.rds")
+
+  
+ a<- ggplot(aes(x = TF1, y = TF2),data = subset(combined, as.integer(TF1)<as.integer(TF2)))  +
+  geom_tile(aes(fill = 100* max_active)) +
+  theme_bw()+ theme(axis.text.x = element_text(angle=90),panel.grid = element_blank(), axis.title = element_blank()) +
+  scale_x_discrete(limits = levels(combined$TF1),position = "top") + scale_y_discrete(limits = levels(combined$TF1))+
+  scale_fill_gradientn(colours = c("black", "red", "orange", "yellow"), limits = c(0,100), name = "% active") + 
+  new_scale_fill() + 
+  geom_tile(aes(fill = 100* max_repressed), data = subset(combined, as.integer(TF1)>as.integer(TF2))) +
+  scale_fill_gradientn(colours = c("black", "blue", "green"), limits = c(0,30), name = "% repressed") +
+  geom_point(shape=16, color = "white", size = 0.5, data =  subset(combined, as.integer(TF1)<as.integer(TF2) & class %in% c("activator", "dual"))) +
+  geom_point(shape=16, color = "white", size = 0.5, data =  subset(combined, as.integer(TF1)>as.integer(TF2) & class %in% c("repressor", "dual"))) +
+  scale_shape_manual(values = c("activator" = 2, "repressor" = 6, "dual" = 3)) 
+  print(a)
+```
+
+```{r fig7bpdf, include=FALSE}
+pdf("panels/figure7b.pdf", width = 6.5,height=5.5)
+print(a)
+dev.off()
+```
+
+## Figure 7C
+
+```{r fig7c, fig.width=3.2,fig.height=2.5}
+
+combined_k562 <- readRDS("Figure7_TFpairs_K562_full.rds")
+combined_k562$class <- factor(combined_k562$class, levels = c("activator","dual","other","repressor"))
+combined <- readRDS("Figure7_TFpairs_HSPC_full.rds")
+combined$class <- factor(combined$class, levels = c("activator","dual","other","repressor"))
+
+#add annotation on the single factors
+  active_libA <- subset(readRDS("Figure2_TF_classification.rds"), !grepl("-", tfcombo))
+classes.libA <- active_libA$class
+names(classes.libA) <- active_libA$tfcombo
+combined$TF1.class <- classes.libA[as.character(combined$TF1)]
+combined$TF2.class <- classes.libA[as.character(combined$TF2)]
+
+libA_K562 <- readRDS("additional_data/Figure7_K562_singleFactorClass.rds")
+classes.libA <- libA_K562$class
+names(classes.libA) <- libA_K562$TF
+combined_k562$TF1.class <- classes.libA[as.character(combined$TF1)]
+combined_k562$TF2.class <- classes.libA[as.character(combined$TF2)]
+
+stats.k562 <- with(subset(combined_k562, as.integer(TF1)<as.integer(TF2) ), table(class))
+stats.hspc <- with(subset(combined, as.integer(TF1)<as.integer(TF2) ), table(class))
+switches.k562<- with(subset(combined_k562, as.integer(TF1)<as.integer(TF2) & (TF1.class == "activator" & TF2.class == "activator" & class %in% c("repressor","dual"))), length(class))
+switches.hspc <- with(subset(combined, as.integer(TF1)<as.integer(TF2) & (TF1.class == "activator" & TF2.class == "activator" & class %in% c("repressor","dual"))), length(class))
+
+
+stats <- data.frame(class = c(names(stats.k562), "switches", names(stats.hspc), "switches"),
+                    n = c(unname(stats.k562),switches.k562, unname(stats.hspc), switches.hspc),
+                    celltype = rep(c("K562", "HSPC"), each = 5))
+stats$class[stats$class == "other"] <- "inactive"
+stats$class <- factor(stats$class, levels = c("activator", "other", "repressor", "dual"))
+
+a <- qplot(x = celltype, y = n, fill = class, data = subset(stats, class %in% c("activator", "repressor")), geom="col") + facet_wrap(~class, scales= "free_y", ncol=1) + theme_bw() +
+  theme(panel.grid = element_blank()) + ylab("Number of factor pairs") + xlab("Cell type") + scale_fill_manual(values = c("activator" = "#65C1A4", "dual"="#F68D62", "other"="#8C9DC9", "repressor"="#E28BBB"), name = "Class (combination)")
+print(a)
+```
+```{r fig7cpdf, include=FALSE}
+pdf("panels/figure7c.pdf", width=3,height=2.5)
+print(a)
+dev.off()
+```
+
+## Figure 7D
+
+```{r fig7d, fig.width=3.2,fig.height=2.5}
+
+stats.ar <- subset(combined,  as.integer(TF1)<as.integer(TF2) & ((TF1.class == "activator" & TF2.class == "repressor") |(TF2.class == "activator" & TF1.class == "repressor") ), select = c("tfcombo", "class", "TF1", "TF2"))
+stats.ar$celltype = "HSPC"
+stats.ar.k562 <- subset(combined_k562,  as.integer(TF1)<as.integer(TF2) & ((TF1.class == "activator" & TF2.class == "repressor") |(TF2.class == "activator" & TF1.class == "repressor") ), select = c("tfcombo", "class", "TF1", "TF2"))
+stats.ar.k562$celltype = "K562"
+stats.ar <- rbind(stats.ar, stats.ar.k562)
+stats.ar$class <- factor(stats.ar$class, levels = c("activator", "other", "repressor", "dual"))
+stats.ar.norm <- ddply(stats.ar, "celltype", summarise, variable = levels(class), freq = table(class) / length(class))
+
+a <- qplot(x = celltype, y = 100*freq, fill = variable, geom="col",data = stats.ar.norm)  + theme_bw() + scale_fill_brewer(palette = "Set2", name = "Class (Combination)") + 
+  theme(panel.grid = element_blank()) + ylab("% of activator-repressor pairs") + xlab("Cell type")
+print(a)
+```
+
+```{r fig7dpdf, include=FALSE}
+pdf("panels/figure7d.pdf", width=3,height=2.5)
+print(a)
+dev.off()
+```
+
+## Figure 7E
+
+Combine with activity estimates from Lib A (Figure 2)
+
+```{r fig7e,fig.width=2.5,fig.height=2.5}
+active_libA <- readRDS("Figure2_TF_activity.rds")
+classes_libA <- subset(readRDS("Figure2_TF_classification.rds"), !grepl("-", tfcombo))
+colnames(classes_libA)[1] <- "TF"
+active_libA <- merge(active_libA, classes_libA[,c("TF", "class")])
+
+combo_summary <- ddply(combined, "TF1", summarise, nact = sum(class =="activator" | class == "dual"), 
+                       nrep = sum(class=="repressor"| class == "dual"), ndual =sum( class == "dual"),
+                       nswitch = sum(TF1.class == "activator" & TF2.class == "activator" & class %in% c("repressor","dual"), na.rm=T))
+colnames(combo_summary)[1] <- "TF"
+combo_summary <- merge(combo_summary, active_libA)
+
+qplot(x = 100*max_active, y = nact,data = combo_summary, color = class) + 
+  scale_color_manual(values = c("activator" = "#65C1A4", "dual"="#F68D62", "other"="#8C9DC9", "repressor"="#E28BBB"), name = "Class (individual)", guide=F)+
+  coord_cartesian(xlim=c(-5,100),ylim=c(0,41))+
+  geom_text_repel(aes(label = TF), data = subset(combo_summary, TF %in% c("Myb", "Trp53", "Cebpa")), color = "black") + 
+  theme_bw() + theme(panel.grid = element_blank()) + scale_y_continuous(breaks = seq(0,40,by=5), labels = sprintf("%d/41",seq(0,40,by=5))) + 
+  xlab("% of sequences active\n(single factor / lib 1)") + ylab("# of combinations activator (lib 3)")
+
+```
+
+
+## Figure 7F
+
+Fit the relationship between activity of the individual factors and activity of the pair
+
+```{r fig7f}
+
+#calculate an overall slope!!!!!
+formerge <- active_libA; colnames(formerge)[1] <- "TF2"
+all.merged <- merge(formerge,combined, by = "TF2", suffixes = c(".TF2", ".combined"))
+formerge <- active_libA; colnames(formerge)[1] <- "TF1"
+
+all.merged <- merge(all.merged[,c("TF1", "TF2", "max_active.combined", "max_active.TF2")],formerge[,c("TF1", "max_active")], by = "TF1")
+all.merged$max_active.combined <- 100*all.merged$max_active.combined
+all.merged$max_active <- 100*all.merged$max_active
+all.merged$max_active.TF2 <- 100*all.merged$max_active.TF2
+all.merged$tfcombo <- paste(all.merged$TF1, all.merged$TF2, sep = "-")
+m <- lm( max_active.combined ~ max_active.TF2* max_active + 0, data = all.merged)
+
+
+grid <- expand.grid(max_active.TF2 = 1:100, max_active = 1:100)
+grid$max_active.combined <- predict(m, grid)
+gridmat <- acast(max_active ~max_active.TF2, data = grid, value.var = "max_active.combined")
+
+
+library(plotly)
+fir <- plot_ly(z = ~grid) %>% add_surface()
+t1 <- list(
+  size = 16
+)
+fir <- plot_ly(all.merged, y = ~max_active, x = ~max_active.TF2, z = ~max_active.combined) %>% 
+  add_trace(size = 0.2, color = I("grey30"), text = ~tfcombo, hoverinfo = "info") %>%
+  add_surface(y = NULL, x = NULL, z = ~gridmat, opacity = 0.8, colorscale = "Redor", colorbar = list(title = 'Linear fit')) %>%
+  layout(scene = list(
+    xaxis = list(
+      title = '',
+      tickfont = list(size = 14),
+      linewidth = 4,  # Increase axis line width
+      gridwidth = 2   # Increase grid line width
+    ),
+    yaxis = list(
+      title = '',
+      tickfont = list(size = 14),
+      linewidth = 4,  # Increase axis line width
+      gridwidth = 2   # Increase grid line width
+    ),
+    zaxis = list(
+      title = '',
+      tickfont = list(size = 14),
+      tickvals = c(10, 30, 50, 70),  # Specify tick labels
+      linewidth = 4,  # Increase axis line width
+      gridwidth = 2   # Increase grid line width
+    )
+  ))
+
+fir
+
+```
+
+## Figure 7G-I
+
+Various slices through the 3D scatter plot, for individual TFs
+
+```{r fig7g,fig.width=2.5,fig.height=2.5}
+cebpa <- subset(combined, TF1 == "Cebpa")
+base_slope <- 100*active_libA$max_active[active_libA$TF == "Cebpa"]
+formerge <- active_libA; colnames(formerge)[1] <- "TF2"
+cebpa <- merge(formerge,cebpa, by = "TF2", suffixes = c(".alone", ".cebpa"))
+
+qplot(x = 100*max_active.alone, y = 100*max_active.cebpa,data=cebpa) +
+  geom_abline(intercept = m$coefficients[1] * base_slope, slope = m$coefficients[2] + base_slope *m$coefficients[3] , linetype = 2) + 
+  geom_text_repel(aes(label = TF2), color = "black", data = subset(cebpa, TF2 %in% c("Myb","Sp1", "Mecom", "Nfyc", "Elk1", "Gata1", "Nfkb1", "Spi1", "Stat5a"))) + 
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  xlab("% of sequences active\n(single factor / lib A)") + ylab("% of sequebces active\n(with Cebpa)")
+
+
+cebpa <- subset(combined, TF1 == "Gata1")
+formerge <- active_libA; colnames(formerge)[1] <- "TF2"
+cebpa <- merge(formerge,cebpa, by = "TF2", suffixes = c(".alone", ".cebpa"))
+base_slope <- 100*active_libA$max_active[active_libA$TF == "Gata1"]
+
+qplot(x = 100*max_active.alone, y = 100*max_active.cebpa,data=cebpa) +
+  geom_abline(intercept = m$coefficients[1] * base_slope, slope = m$coefficients[2] + base_slope *m$coefficients[3] , linetype = 2) + 
+  geom_text_repel(aes(label = TF2), color = "black", data = subset(cebpa, TF2 %in% c("Cebpa", "Myb", "Nfkb1", "Meis1", "Fli1", "Mecom"))) + 
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  xlab("% of sequences active\n(single factor / lib A)") + ylab("% of sequebces active\n(with Gata1)")
+
+cebpa <- subset(combined, TF1 == "Meis1")
+formerge <- active_libA; colnames(formerge)[1] <- "TF2"
+cebpa <- merge(formerge,cebpa, by = "TF2", suffixes = c(".alone", ".cebpa"))
+base_slope <- 100*active_libA$max_active[active_libA$TF == "Meis1"]
+
+qplot(x = 100*max_active.alone, y = 100*max_active.cebpa,data=cebpa) +
+  geom_text_repel(aes(label = TF2), color = "black", , data = subset(cebpa, TF2 %in% c("Gata2",  "Tcf3", "Tfap2a","Cebpa", "Trp53"))) + 
+  geom_abline(intercept = m$coefficients[1] * base_slope, slope = m$coefficients[2] + base_slope *m$coefficients[3] , linetype = 2) + 
+  theme_bw() + theme(panel.grid = element_blank()) +
+  xlab("% of sequences active\n(single factor / lib A)") + ylab("% of sequebces active\n(with Meis1)")
+```
+
+```{r sinfo}
+print(sessionInfo())
+```

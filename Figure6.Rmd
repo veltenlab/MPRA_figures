@@ -1,0 +1,151 @@
+---
+title: "Figure 6"
+author: "Robert Froemel & Lars Velten"
+date: "2025-02-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data from figshare
+
+Also read in additional metadata on these sequences. Sequence design is described in https://github.com/veltenlab/MPRA_prediction . This notebook simply generates some plots.
+
+```{r load_data}
+load(url("https://figshare.com/ndownloader/files/53009321"))
+metadata <- read.csv("additional_data/Figure6_libD_metadata.csv",sep=";")
+feasibility <- readRDS("additional_data/Figure6_libD_feasibility.rds")
+
+```
+
+```{r load_packages, warning=F, message=F}
+require(ggplot2)
+require(ggrepel)
+require(plyr)
+require(reshape2)
+require(gridExtra)
+```
+
+## Organize data and metadata
+
+```{r}
+
+
+#format task definitions into a convenient format
+D <- acast(mpra.data$HSPC.libD$DATA,formula = CRS ~clusterID, value.var = "mean.norm.adj")
+task <- read.csv(textConnection(metadata$design_task), header=F, col.names =  names(cellstate.map))
+rownames(task) <- metadata$CRS
+task <- task[rownames(D),]
+S <- metadata[,c("CRS","design_strategy","design_search","SubLibrary", "seq")]
+rownames(S) <- metadata$CRS
+S <- S[rownames(D),]
+
+#define sequences as active and repressed
+all_bad_sites <- subset(mpra.data$HSPC.libD$CONTROLS.GENERAL,ControlType == "ScrambleTFBS")
+bad_range <- ddply(as.data.frame(all_bad_sites), c("clusterID", "Library"),summarise, q05.background = quantile(mean.norm.adj, 0.05), q95.background = quantile(mean.norm.adj,0.95))
+rownames(bad_range) <- paste(bad_range$Library, bad_range$clusterID)
+
+mpra.data$HSPC.libD$DATA <- merge(mpra.data$HSPC.libD$DATA, bad_range)
+mpra.data$HSPC.libD$DATA$active <- with(mpra.data$HSPC.libD$DATA , mean.norm.adj > q95.background)
+mpra.data$HSPC.libD$DATA$repressed <- with(mpra.data$HSPC.libD$DATA, mean.norm.adj < q05.background)
+
+#data exclusions - see a,b below
+task$CRS <- rownames(task)
+task$low <- apply(task[,1:7],1,function(x) any(x==0.4)) #a) we made initially some designs meant to give "weak" activity, these are not included in the analysis
+task$repr <- apply(task[,1:7],1,function(x) any(x==-3))
+
+task$task_key <- apply(task[,1:7], 1,paste, collapse = ",")
+task$valid <- task$State_4M == task$State_5M #b) we made some designs initially where we aimed for different activities in early and late monocyte precursors. But then we measured this cell states as one combined cell state, because diferences in the other libraries were minimal. Hence we exclude all designs aimed to give different activities in the two cell states.
+task.long <- melt(task, variable.name = "clusterID", value.name =  "task", id.vars = c("CRS", "low", "task_key", "repr", "valid"))
+
+combined <- merge(task.long,mpra.data$HSPC.libD$DATA)
+
+combined <- merge(combined, feasibility[, 8:9], all.x = T)
+
+combined.abs <- subset(combined, SubLibrary == "activation" & !low & valid) #look 
+```
+
+## Figure 6D
+
+```{r fig6d, fig.width=1.8,fig.height=2.6}
+ggplot(data = subset(combined.abs, design_strategy== "model-guided" & design_search == "local"),
+       aes(fill = as.factor(task), y = mean.scaled.final, x = clusterID)) + geom_boxplot() +
+    scale_fill_manual(values = c("-0.2"= "#357DBA", "1" = "#E21F26"), name = "Task", labels = c("-0.2" = "Inactive", "1" = "Active")) +
+    theme_bw() + theme(legend.position = "bottom", panel.grid = element_blank(),axis.text.x = element_text(angle=45, hjust=1)) + scale_x_discrete(labels = cellstate.map) +
+    ylab("Activity") + xlab("") + coord_cartesian(ylim = c(-1.2,1.7))
+
+```
+
+## Figure 6A
+
+```{r fig6a, fig.width=3.6,fig.height=5}
+
+task.detail <-ddply(subset(combined.abs, design_search == "local" & design_strategy == "model-guided" ), c( "task_key", "CRS"), # #
+                summarise, 
+                nobs = sum(!is.na(active)),
+                ncorrect = sum(active == (task==1)))
+task.detail.summary <- ddply(subset(task.detail,nobs ==6), c("task_key", "ncorrect"), summarise, nseq = length(CRS))
+colnames(task.detail.summary)[1] <- "task"
+task.plf <- feasibility
+task.plf <- subset(task.plf, State_4M == State_5M)
+task.plf.2 <- melt(task.plf, id.vars = c("feasibility", "task"), variable.name = "clusterID")
+
+a <- qplot(x = reorder(task, feasibility), y = clusterID, fill = value, data = subset(task.plf.2, !grepl ("0.4", task) & clusterID != "State_5M"), geom = "tile") + 
+  scale_fill_gradient("Target", low = "#357DBA", high= "#E21F26")  + theme_bw() + theme(panel.grid = element_blank(), axis.text.x = element_blank(), legend.position = "none") +
+  scale_y_discrete(labels = cellstate.map) + xlab("Task, by feasibility") + ylab("")
+
+task.plf <- subset(task.plf, !grepl ("0.4", task))
+task.plf$task_number <- as.numeric(with(task.plf, reorder(task, feasibility)))
+
+b <- qplot(x = task_number, y = feasibility/60*100, data = task.plf, fill = feasibility > 0, geom = "col")+
+  xlab("") + ylab("\n\n% of designs valid\n(Feasibility)") + theme_bw() + theme(panel.grid = element_blank(), axis.text.x = element_blank()) +
+  scale_fill_manual( values = c("TRUE"= "black", "FALSE"= "grey"), labels = c("FALSE" = "Infeasible", "TRUE"= "Feasible"), name = "Ab initio classification", guide = "none") +
+  scale_x_continuous(breaks = 1:max(task.plf$task_number), position = "bottom") + coord_cartesian(expand=F)
+
+task.plf$task_number <- as.numeric(with(task.plf, reorder(task, feasibility)))
+
+task.plf.detail <- merge(task.plf, task.detail.summary, all.x = T)
+
+
+d <- ggplot(aes(x = task_number, y = ncorrect), data = task.plf.detail)+
+  geom_blank() + 
+  geom_hline(yintercept=3, linetype=3) + 
+  geom_point(aes(size = nseq, color = nseq), data = subset(task.plf.detail, feasibility > 0)) + xlab("")  + ylab("\n\nCorrect cell states") + theme_bw() + theme(panel.grid = element_blank(), axis.text.x = element_blank(), legend.position = "bottom") +
+  geom_smooth(aes(weight = nseq), data = subset(task.plf.detail, feasibility > 0)) + scale_x_continuous(breaks = 1:length(unique(task.plf$task)), position = "top") + 
+  coord_cartesian(expand=F, ylim = c(-0.2,6.2)) + 
+  scale_size_area(name = "n sequences", max_size = 2, breaks = c(1,5,10,14)) +
+  scale_color_gradientn(name = "n sequences", breaks = c(1,5,10,14), colors = c("grey", "blue", "red")) +
+  scale_y_continuous(breaks = 0:6, labels = paste0("   ", 0:6, "/6"))
+
+
+pl <- arrangeGrob(b, a, d, layout_matrix = matrix(c(1,1,1,2,2,2,3,3,3,3,3), ncol=1))
+
+plot(pl)
+
+```
+
+## Figure 6C
+
+```{r fig6c, fig.width=4.5,fig.height=2.5}
+
+top_tasks <- c("1,1,1,-0.2,-0.2,-0.2,-0.2", "1,1,1,-0.2,-0.2,1,1", "1,-0.2,-0.2,1,1,1,-0.2","1,-0.2,1,-0.2,-0.2,-0.2,-0.2")
+task_renamer <- paste("example", 1:4); names(task_renamer) <- top_tasks
+
+fortest <- subset(combined.abs,task_key %in% top_tasks)
+tested <- ddply(fortest, c("task_key", "clusterID"), summarise, pval = 
+                  wilcox.test( mean.scaled.final, fortest$mean.scaled.final[fortest$task_key == unique(task_key) & fortest$task != unique(task)], alternative = ifelse(unique(task) == 1.0, "greater", "less"))$p.value)
+fortest <- merge(fortest, tested)
+fortest$test <- ifelse(fortest$pval > 0.05, "n.s.", ifelse(fortest$task == 1, "higher", "lower"))
+
+ggplot(aes(x = clusterID, y = mean.scaled.final, fill = test), data = fortest) +
+  geom_boxplot(outliers = F) + 
+  facet_wrap(~task_renamer[task_key], scales= "free_y", nrow=1) + scale_fill_manual(values = c("lower"= "#A16227", "higher" = "#FDD900", "n.s." = "grey"), name = "Test result", labels = c("lower" = "lower p<0.05", "higher" = "higher p<0.05", "n.s." = "n.s.")) +
+  theme_bw() + theme(legend.position = "bottom", panel.grid = element_blank(),axis.text.x = element_text(angle=45, hjust=1, size=8),axis.text.y = element_text(size= 8)) + scale_x_discrete(labels = cellstate.map) +
+  ylab("Activity") + xlab("") 
+
+```
+```{r sinfo}
+print(sessionInfo())
+```

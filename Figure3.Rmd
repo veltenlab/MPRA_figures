@@ -1,0 +1,145 @@
+---
+title: "Figure 3"
+author: "Robert Froemel & Lars Velten"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data from figshare
+
+```{r load_data}
+load(url("https://figshare.com/ndownloader/files/53009321"))
+load("additional_data/Figure3_smartseq_data.rda")
+```
+
+```{r load_packages, warning=F, message=F}
+require(ggplot2)
+require(ggrepel)
+require(plyr)
+require(reshape2)
+require(gridExtra)
+```
+
+
+## Example plots (Figure 3A-C) and correlation expression-activity (Figure 3D)
+
+Load gene expression data and setup a function that computes the correlation between expression and activity. It interpolates activity as a function of sum of motif score, creates the plots from figure 3a-c and then checks correlation at two designs: a) an intermediate sum of motif scores and b) at a high motif score
+
+```{r helper_function, message=FALSE, warning=FALSE}
+
+comboplot <- function(tfx, where = NULL, tfxb = tfx, always.max=F) {
+  #if (is.null(where)) where <- max( subset(mpra.data$HSPC.libA$DATA, TF ==tfx)$sum.biophys.affinity)
+  loessmodels <- lapply(unique(mpra.data$HSPC.libA$DATA$clusterID), function(cl) loess(mean.scaled.final~sum.biophys.affinity, data=subset(mpra.data$HSPC.libA$DATA, TF ==tfx & clusterID == cl),weights = subset(mpra.data$HSPC.libA$DATA, TF ==tfx& clusterID == cl)$weights,span = 1))
+  names(loessmodels) <- unique(mpra.data$HSPC.libA$DATA$clusterID)
+  expr <- sapply(unique(mpra.data$HSPC.libA$DATA$clusterID), function(id) {
+    mean(smartseq[tfxb,paste0("State_",metadata.bulk$celltype) == id ])
+  })
+
+  grid <- c(mean(subset(mpra.data$HSPC.libA$DATA, TF ==tfx)$sum.biophys.affinity), #intermediate sum of motif scores
+            quantile(subset(mpra.data$HSPC.libA$DATA, TF ==tfx)$sum.biophys.affinity, 0.98)) #high motif scores
+  if (always.max) grid <- c(quantile(subset(mpra.data$HSPC.libA$DATA, TF ==tfx)$sum.biophys.affinity, 0.98),quantile(subset(mpra.data$HSPC.libA$DATA, TF ==tfx)$sum.biophys.affinity, 0.98))
+  activity <-sapply(unique(mpra.data$HSPC.libA$DATA$clusterID), function(cl) predict(loessmodels[[cl]],newdata= data.frame(sum.biophys.affinity=grid) ))
+  where <- which.max(abs(apply(activity,1,function(x) cor(x, expr, method = "spearman"))))
+  if(length(where)==0) where <-1
+  act <- qplot(x = sum.biophys.affinity, y = mean.scaled.final,data = subset(mpra.data$HSPC.libA$DATA, TF ==tfx),geom="smooth", span=1,color = factor(clusterID),se=F) + 
+    theme_bw() + theme(panel.grid = element_blank(),legend.position = "none")  + xlab("Sum of affinities")+ 
+    ylab("Activity") + scale_color_manual(values = cellstate.colors,name = "Cell type", labels =cellstate.map) +
+    geom_hline(yintercept = 0, linetype=3)
+
+  
+  exprplot <- data.frame(
+    clusterID = unique(mpra.data$HSPC.libA$DATA$clusterID),
+    expr = expr, activity = activity[where,]
+    #activity = sapply(unique(mpra.data$HSPC.libA$DATA$clusterID), function(x) mean(subset(mpra.data$HSPC.libA$DATA, TF ==tfx & clusterID == x)$mean.scaled.final))
+    )
+
+  
+  expr <- qplot(x = expr, y = activity, data = exprplot, color = clusterID,size=I(3))+ scale_color_manual(values = cellstate.colors,name = "Cell type", labels =cellstate.map, guide=F) +
+    theme_bw() + theme(panel.grid = element_blank(),axis.text = element_blank())  + xlab(sprintf("[%s]",paste(tfxb, collapse="+"))) + ylab("Activity")
+  
+  pl <- arrangeGrob(act, expr,layout_matrix = matrix(c(1,2),nrow=1))
+  list(plots = pl, cor = cor.test(exprplot$expr, exprplot$activity, method= "spearman"), act = exprplot$activity)
+}
+
+active_m <- subset(readRDS("Figure2_TF_classification.rds"), !grepl("-",tfcombo))
+colnames(active_m)[1] <- "TF"
+active_m$TF <- as.character(active_m$TF)
+
+combos <- lapply(active_m$TF, comboplot)
+plots <- lapply(combos,"[[","plots")
+names(plots) <-active_m$TF
+```
+
+```{r figure3a_c, fig.width=5, fig.height=2.5}
+  plot(plots[["Gata1"]])
+plot(plots[["Gfi1b"]])
+
+```
+
+```{r figure3d, fig.width=6.5, fig.height=2}
+active_m$cor <- sapply(combos,function(x) x$cor$estimate)
+active_m$p.cor <- sapply(combos,function(x) x$cor$p.value)
+tf.class <- read.csv("additional_data/Figure3_TFclasses.csv") #information on what TFs are considered signaling relays etc
+active_m <- merge(active_m, tf.class)
+
+active_m$facet <- with(active_m, ifelse(cor > 0, "Positive correlation", "Negative correlation" ))
+qplot(size = I(2), x=reorder(TF,cor), y = cor, data= subset(active_m), geom="point", color = class, shape=Category == "Signaling") + 
+  facet_grid(~facet,  space= "free_x", scales= "free_x") + 
+  scale_color_manual(values = c("repressor"= "#E78AC3", "dual"= "#FC8D62","other"= "#8DA0CB","activator"=  "#66C2A5"), name = "Class") + 
+  theme_bw() + theme(panel.grid = element_blank(),axis.text.x=element_text(angle=90)) +xlab("Transcription factor") +
+  ylab("Correlation\n expression, activity") + scale_shape_manual(values = c("TRUE" =1, "FALSE" = 19), name = "", labels = c("TRUE" = "Signaling relays", "FALSE" = "Other TFs")) 
+
+```
+
+```{r figure3dpdf, include=FALSE}
+a <- qplot(size = I(2), x=reorder(TF,cor), y = cor, data= subset(active_m), geom="point", color = class, shape=Category == "Signaling") + 
+  facet_grid(~facet,  space= "free_x", scales= "free_x") + 
+  scale_color_manual(values = c("repressor"= "#E78AC3", "dual"= "#FC8D62","other"= "#8DA0CB","activator"=  "#66C2A5"), name = "Class") + 
+  theme_bw() + theme(panel.grid = element_blank(),axis.text.x=element_text(angle=90)) +xlab("Transcription factor") +
+  ylab("Correlation\n expression, activity") + scale_shape_manual(values = c("TRUE" =1, "FALSE" = 19), name = "", labels = c("TRUE" = "Signaling relays", "FALSE" = "Other TFs")) 
+pdf("panels/figure3d.pdf", width=6.5, height=2)
+print(a)
+dev.off()
+```
+
+## Figure 3E
+
+See separate notebook
+
+## Example plots for non-monotonicity (Figure 3F+G)
+
+```{r figure3f, fig.width=5, fig.height=3}
+
+mpra.data$HSPC.libA$DATA$affinity_rough <- factor(ifelse(mpra.data$HSPC.libA$DATA$affinitynum < 0.3, "low",
+                                       ifelse(mpra.data$HSPC.libA$DATA$affinitynum < 0.8, "mid","high")),
+                                       levels = c("low","mid","high"))
+
+ggplot(aes(x = sum.biophys.affinity, y = mean.scaled.final) , data = subset(mpra.data$HSPC.libA$DATA, TF %in% c("Elk1","Sp1", "Creb1", "Nr2c2")) )+
+  geom_smooth(aes(group = clusterID, color = clusterID), se=F, span=1) + scale_color_manual(values=cellstate.colors, labels = cellstate.map, name = "Cell state")+
+  facet_wrap(~ TF, scales="free_y", nrow=2) +
+  geom_hline(yintercept = 0, linetype =3) + xlab("Sum of affinities") + ylab("Activity") +
+  theme_bw() + theme(panel.grid = element_blank()) 
+
+```
+
+```{r figure3g, fig.width=6, fig.height=2}
+ggplot(aes(x = nrepeats, y = mean.scaled.final, color = affinity_rough) , data = subset(mpra.data$HSPC.libA$DATA, TF %in% c("Elk1","Sp1", "Creb1"))) +
+  geom_smooth(se=F,span=1) + facet_wrap(~ TF, scales="free",nrow=1) +
+  geom_hline(yintercept = 0, linetype =3) + xlab("Number of motifs") + ylab("Activity") +
+  theme_bw(base_size=12) + theme(panel.grid = element_blank()) + 
+  scale_color_manual(name = "Motif\naffinity", values = c("low" = "darkblue", "mid" = "lightblue","high"="darkred"))
+
+
+```
+
+## Biophysical model (Figure 3H,I)
+
+See https://github.com/theobiolab/MPRAfitting
+
+```{r sinfo}
+print(sessionInfo())
+```
